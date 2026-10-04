@@ -1,330 +1,294 @@
-// --- Elements ---
+// --- DOM References ---
 const editor = document.getElementById('editor');
-const editorCard = document.getElementById('editorCard');
 const charCount = document.getElementById('charCount');
-const roomDisplay = document.getElementById('roomDisplay');
-const currentRoomCode = document.getElementById('currentRoomCode');
-const syncPing = document.getElementById('syncPing');
-const statusBeacon = document.getElementById('beacon');
-const statusLabel = document.getElementById('statusLabel');
-const connectedDevice = document.getElementById('connectedDevice');
-const copyPromptBtn = document.getElementById('copyPromptBtn');
-const copyLabel = document.getElementById('copyLabel');
-const clearBtn = document.getElementById('clearBtn');
-const sendFileBtn = document.getElementById('sendFileBtn');
-const fileInput = document.getElementById('fileInput');
-const filesDeck = document.getElementById('filesDeck');
-const qrBtn = document.getElementById('qrBtn');
-const qrModal = document.getElementById('qrModal');
-const closeModalBtn = document.getElementById('closeModalBtn');
-const roomLinkText = document.getElementById('roomLinkText');
+const currentRoomText = document.getElementById('currentRoomText');
 const copyUrlBtn = document.getElementById('copyUrlBtn');
+const customRoomInput = document.getElementById('customRoomInput');
+const joinCustomBtn = document.getElementById('joinCustomBtn');
+const networkState = document.getElementById('networkState');
+const flashIndicator = document.getElementById('flashIndicator');
+const statusCircle = document.getElementById('statusCircle');
+const statusLabel = document.getElementById('statusLabel');
+const peerDevice = document.getElementById('peerDevice');
+const attachBtn = document.getElementById('attachBtn');
+const fileInput = document.getElementById('fileInput');
+const clearBtn = document.getElementById('clearBtn');
+const copyPromptBtn = document.getElementById('copyPromptBtn');
+const copyPromptText = document.getElementById('copyPromptText');
+const filesContainer = document.getElementById('filesContainer');
+const qrToggleBtn = document.getElementById('qrToggleBtn');
+const qrModal = document.getElementById('qrModal');
+const closeModal = document.getElementById('closeModal');
+const modalUrlDisplay = document.getElementById('modalUrlDisplay');
 const themeToggleBtn = document.getElementById('themeToggleBtn');
 const themeIcon = document.getElementById('themeIcon');
 const toast = document.getElementById('toast');
-const manualRoomInput = document.getElementById('manualRoomInput');
-const joinRoomBtn = document.getElementById('joinRoomBtn');
-const newRoomBtn = document.getElementById('newRoomBtn');
 
-// --- 1. Unique Room Identity ---
-function generateRoomCode() {
+// --- 1. Room Strategy: Auto-Generated or Custom ---
+function getRandomCode() {
   const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
-  let result = '';
+  let out = '';
   for (let i = 0; i < 6; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+    out += chars.charAt(Math.floor(Math.random() * chars.length));
   }
-  return result;
+  return out;
 }
 
-function resolveRoomCode() {
+function getActiveRoom() {
   const hash = window.location.hash.replace('#', '').trim();
   if (hash) {
     return hash.toLowerCase();
   }
-  const newCode = generateRoomCode();
-  // Use replaceState to ensure GitHub Pages doesn't lose hash
-  window.history.replaceState(null, '', `#${newCode}`);
-  return newCode;
+  const auto = getRandomCode();
+  window.history.replaceState(null, '', `#${auto}`);
+  return auto;
 }
 
-let activeRoomCode = resolveRoomCode();
-currentRoomCode.textContent = activeRoomCode;
-roomDisplay.textContent = `Room: #${activeRoomCode}`;
+let activeRoom = getActiveRoom();
+currentRoomText.textContent = '#' + activeRoom;
 
-function getFullShareUrl() {
-  const base = window.location.origin + window.location.pathname;
-  return `${base}#${activeRoomCode}`;
+function getShareableURL() {
+  return `${window.location.origin}${window.location.pathname}#${activeRoom}`;
 }
 
-roomLinkText.textContent = getFullShareUrl();
+// Custom Room Switch
+joinCustomBtn.addEventListener('click', () => {
+  const desired = customRoomInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  if (!desired) return;
+  window.location.hash = desired;
+  window.location.reload();
+});
 
-// Regenerate QR Code for current exact room URL
-let qrCodeInstance = null;
-function refreshQR() {
-  const container = document.getElementById('qrcode');
-  container.innerHTML = '';
-  qrCodeInstance = new QRCode(container, {
-    text: getFullShareUrl(),
-    width: 170,
-    height: 170,
-    colorDark: '#0a0a0c',
-    colorLight: '#ffffff',
-    correctLevel: QRCode.CorrectLevel.M
-  });
-}
-refreshQR();
-
-// --- Local Storage Cache ---
-const getCacheKey = () => `airtext_cache_${activeRoomCode}`;
-editor.value = localStorage.getItem(getCacheKey()) || '';
+// Cache Prompt
+const cacheKey = `airtext_draft_${activeRoom}`;
+editor.value = localStorage.getItem(cacheKey) || '';
 updateCharCount();
 
 function updateCharCount() {
   charCount.textContent = `${editor.value.length} characters`;
 }
 
-// Device tag
-const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
-const myDeviceLabel = isMobile ? 'Mobile Phone' : 'Laptop / PC';
+// Device Label
+const isPhone = /Android|iPhone|iPad/i.test(navigator.userAgent);
+const myPlatform = isPhone ? 'Mobile Device' : 'Laptop / PC';
 
-// --- 2. WebRTC Peer Connection with Public STUN Servers ---
+// --- 2. Real-Time WebRTC P2P (PeerJS + STUN) ---
 let peer = null;
 let activeConnection = null;
-let isRemoteInput = false;
+let isRemoteChange = false;
 
-// Google Public STUN servers allow mobile data <-> home Wi-Fi NAT punching
+// Standard STUN servers enable cross-network NAT traversal
 const peerConfig = {
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' }
+      { urls: 'stun:stun1.l.google.com:19302' }
     ]
   }
 };
 
-function connectToRoom(roomCode) {
-  if (peer) {
-    peer.destroy();
-  }
-  updateStatus(false, 'Connecting to server...');
+function startP2P(room) {
+  if (peer) peer.destroy();
 
-  const hostPeerId = `airtext-room-${roomCode}-host`;
-  const guestPeerId = `airtext-room-${roomCode}-guest-${Math.random().toString(36).substring(2, 6)}`;
+  const hostID = `airtext-${room}-h`;
+  const guestID = `airtext-${room}-g-${Math.random().toString(36).substring(2, 6)}`;
 
-  // Attempt to initialize as the Room Host
-  peer = new Peer(hostPeerId, peerConfig);
+  // Attempt Host role first
+  peer = new Peer(hostID, peerConfig);
 
   peer.on('open', () => {
-    updateStatus(false, 'Room ready • Waiting for mobile...');
+    setConnectionStatus(false, 'Waiting for other device...');
+    networkState.textContent = 'Room active. Awaiting mobile/peer...';
   });
 
   peer.on('error', (err) => {
+    // If host ID exists, become client
     if (err.type === 'unavailable-id') {
-      // Host already exists! This device is the guest/client.
       peer.destroy();
-      peer = new Peer(guestPeerId, peerConfig);
+      peer = new Peer(guestID, peerConfig);
 
       peer.on('open', () => {
-        updateStatus(false, 'Pairing with laptop...');
-        const conn = peer.connect(hostPeerId, { reliable: true });
-        setupConnectionEvents(conn);
+        setConnectionStatus(false, 'Connecting to room host...');
+        networkState.textContent = 'Attempting connection...';
+        const conn = peer.connect(hostID, { reliable: true });
+        setupDataChannel(conn);
       });
-
-      peer.on('error', (clientErr) => {
-        console.error('Client peer error:', clientErr);
-        updateStatus(false, 'Connection error');
-      });
-    } else {
-      console.warn('Peer error:', err);
     }
   });
 
   peer.on('connection', (conn) => {
-    setupConnectionEvents(conn);
+    setupDataChannel(conn);
   });
 }
 
-function setupConnectionEvents(conn) {
+function setupDataChannel(conn) {
   activeConnection = conn;
 
   conn.on('open', () => {
-    updateStatus(true, 'Direct P2P Synced');
-    conn.send({ type: 'HANDSHAKE', device: myDeviceLabel });
+    setConnectionStatus(true, 'P2P Connected');
+    networkState.textContent = 'Connected (Direct WebRTC DataChannel)';
+    conn.send({ type: 'HANDSHAKE', device: myPlatform });
 
-    // Sync any existing draft
     if (editor.value) {
-      conn.send({ type: 'SYNC_TEXT', text: editor.value });
+      conn.send({ type: 'TEXT', text: editor.value });
     }
   });
 
-  conn.on('data', (data) => {
-    if (data.type === 'HANDSHAKE') {
-      connectedDevice.textContent = `Linked: ${data.device}`;
-      showToast(`Connected to ${data.device}`);
-    } else if (data.type === 'SYNC_TEXT') {
-      isRemoteInput = true;
-      editor.value = data.text;
-      localStorage.setItem(getCacheKey(), data.text);
+  conn.on('data', (msg) => {
+    if (msg.type === 'HANDSHAKE') {
+      peerDevice.textContent = `Linked: ${msg.device}`;
+      notify(`Linked to ${msg.device}`);
+    } else if (msg.type === 'TEXT') {
+      isRemoteChange = true;
+      editor.value = msg.text;
+      localStorage.setItem(cacheKey, msg.text);
       updateCharCount();
-      triggerArrivalAnimation();
-      isRemoteInput = false;
-    } else if (data.type === 'SYNC_FILE') {
-      renderIncomingFile(data);
-      showToast(`Received ${data.name}`);
+      triggerPulse();
+      isRemoteChange = false;
+    } else if (msg.type === 'FILE') {
+      addFileItem(msg);
+      notify(`Received file: ${msg.name}`);
     }
   });
 
   conn.on('close', () => {
-    updateStatus(false, 'Peer disconnected');
-    connectedDevice.textContent = 'Standby';
+    setConnectionStatus(false, 'Peer disconnected');
+    networkState.textContent = 'Peer left. Standing by...';
+    peerDevice.textContent = 'No device connected';
     activeConnection = null;
   });
 }
 
-function updateStatus(isLive, label) {
-  statusBeacon.className = 'status-beacon' + (isLive ? ' live' : '');
+function setConnectionStatus(connected, label) {
+  statusCircle.className = 'status-circle' + (connected ? ' connected' : '');
   statusLabel.textContent = label;
 }
 
-function triggerArrivalAnimation() {
-  editorCard.classList.remove('receiving-pulse');
-  void editorCard.offsetWidth;
-  editorCard.classList.add('receiving-pulse');
-
-  syncPing.classList.add('show');
-  setTimeout(() => syncPing.classList.remove('show'), 1500);
+function triggerPulse() {
+  flashIndicator.classList.add('active');
+  setTimeout(() => flashIndicator.classList.remove('active'), 1200);
 }
 
-// --- 3. Typing Sync with Debounce ---
-let typingTimer;
+// --- 3. Synchronized Editor Typing ---
+let debouncer;
 editor.addEventListener('input', () => {
   updateCharCount();
-  localStorage.setItem(getCacheKey(), editor.value);
+  localStorage.setItem(cacheKey, editor.value);
 
-  if (isRemoteInput || !activeConnection) return;
+  if (isRemoteChange || !activeConnection) return;
 
-  clearTimeout(typingTimer);
-  typingTimer = setTimeout(() => {
-    activeConnection.send({ type: 'SYNC_TEXT', text: editor.value });
-  }, 100);
+  clearTimeout(debouncer);
+  debouncer = setTimeout(() => {
+    activeConnection.send({ type: 'TEXT', text: editor.value });
+  }, 90);
 });
 
-// --- 4. File Sharing ---
-sendFileBtn.addEventListener('click', () => fileInput.click());
+// --- 4. File Transfers ---
+attachBtn.addEventListener('click', () => fileInput.click());
 
 fileInput.addEventListener('change', () => {
   const file = fileInput.files[0];
   if (!file) return;
 
   if (!activeConnection) {
-    showToast('Wait until devices are linked before sending files');
+    notify('Pair with your device before sending files.');
     return;
   }
 
   const reader = new FileReader();
   reader.onload = () => {
     const payload = {
-      type: 'SYNC_FILE',
+      type: 'FILE',
       name: file.name,
-      size: formatSize(file.size),
+      size: formatBytes(file.size),
       data: reader.result
     };
     activeConnection.send(payload);
-    renderIncomingFile(payload, true);
+    addFileItem(payload, true);
   };
   reader.readAsDataURL(file);
   fileInput.value = '';
 });
 
-function renderIncomingFile({ name, size, data }, isSelf = false) {
-  const card = document.createElement('div');
-  card.className = 'incoming-card';
-  card.innerHTML = `
+function addFileItem(file, isOut = false) {
+  const item = document.createElement('div');
+  item.className = 'file-item';
+  item.innerHTML = `
     <div>
-      <div class="file-title">${isSelf ? '📤 Sent: ' : '📥 Received: '}${name}</div>
-      <div class="file-size-tag">${size}</div>
+      <div class="file-name">${isOut ? '📤 Sent: ' : '📥 Received: '}${file.name}</div>
+      <div class="file-size">${file.size}</div>
     </div>
-    <a href="${data}" download="${name}" class="download-link">Download</a>
+    <a href="${file.data}" download="${file.name}" class="file-download-link">Download</a>
   `;
-  filesDeck.prepend(card);
+  filesContainer.prepend(item);
 }
 
-function formatSize(bytes) {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / 1048576).toFixed(1) + ' MB';
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
 }
 
-// --- 5. Manual Room Switch & Actions ---
-joinRoomBtn.addEventListener('click', () => {
-  const inputCode = manualRoomInput.value.trim().toLowerCase();
-  if (!inputCode) return;
-  window.location.hash = inputCode;
-  window.location.reload();
-});
-
-newRoomBtn.addEventListener('click', () => {
-  window.location.hash = generateRoomCode();
-  window.location.reload();
-});
-
+// --- 5. Action Handlers & QR Modal ---
 copyPromptBtn.addEventListener('click', async () => {
   if (!editor.value) return;
   await navigator.clipboard.writeText(editor.value);
-  copyLabel.textContent = 'Copied!';
-  setTimeout(() => (copyLabel.textContent = 'Copy Prompt'), 1500);
+  copyPromptText.textContent = 'Copied!';
+  setTimeout(() => (copyPromptText.textContent = '📋 Copy Prompt'), 1500);
 });
 
 clearBtn.addEventListener('click', () => {
   editor.value = '';
   updateCharCount();
-  localStorage.removeItem(getCacheKey());
+  localStorage.removeItem(cacheKey);
   if (activeConnection) {
-    activeConnection.send({ type: 'SYNC_TEXT', text: '' });
+    activeConnection.send({ type: 'TEXT', text: '' });
   }
 });
 
 copyUrlBtn.addEventListener('click', async () => {
-  await navigator.clipboard.writeText(getFullShareUrl());
-  showToast('Room link copied!');
+  await navigator.clipboard.writeText(getShareableURL());
+  notify('Room link copied!');
 });
 
-qrBtn.addEventListener('click', () => {
-  refreshQR();
-  roomLinkText.textContent = getFullShareUrl();
+// QR Modal Handling
+qrToggleBtn.addEventListener('click', () => {
+  const qrBox = document.getElementById('qrcode');
+  qrBox.innerHTML = '';
+  new QRCode(qrBox, {
+    text: getShareableURL(),
+    width: 170,
+    height: 170,
+    colorDark: '#0c0d12',
+    colorLight: '#ffffff'
+  });
+  modalUrlDisplay.textContent = getShareableURL();
   qrModal.classList.add('open');
 });
 
-closeModalBtn.addEventListener('click', () => qrModal.classList.remove('open'));
+closeModal.addEventListener('click', () => qrModal.classList.remove('open'));
 qrModal.addEventListener('click', (e) => {
   if (e.target === qrModal) qrModal.classList.remove('open');
 });
 
-// Theme handling
-const savedTheme = localStorage.getItem('airtext_theme') || 'dark';
-document.documentElement.setAttribute('data-theme', savedTheme);
-updateThemeSvg(savedTheme);
+// Theme Toggle
+const storedTheme = localStorage.getItem('airtext_theme') || 'dark';
+document.documentElement.setAttribute('data-theme', storedTheme);
+themeIcon.textContent = storedTheme === 'dark' ? '☀' : '🌙';
 
 themeToggleBtn.addEventListener('click', () => {
-  const curr = document.documentElement.getAttribute('data-theme');
-  const target = curr === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', target);
-  localStorage.setItem('airtext_theme', target);
-  updateThemeSvg(target);
+  const now = document.documentElement.getAttribute('data-theme');
+  const next = now === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('airtext_theme', next);
+  themeIcon.textContent = next === 'dark' ? '☀' : '🌙';
 });
 
-function updateThemeSvg(theme) {
-  themeIcon.innerHTML = theme === 'dark'
-    ? '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>'
-    : '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>';
-}
-
-function showToast(text) {
+function notify(text) {
   toast.textContent = text;
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 2000);
 }
 
-// Start peer connection with active room
-connectToRoom(activeRoomCode);
+// Initialize
+startP2P(activeRoom);
