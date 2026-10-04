@@ -42,7 +42,7 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  transition: background-color 0.2s, color 0.2s;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 /* Navbar */
@@ -107,6 +107,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  transition: border-color 0.2s ease;
 }
 
 .nav-btn:hover {
@@ -181,6 +182,7 @@ body {
   font-size: 0.85rem;
   outline: none;
   width: 130px;
+  transition: border-color 0.2s ease;
 }
 
 .room-inputs input:focus {
@@ -189,13 +191,14 @@ body {
 
 .btn-accent {
   background: var(--accent);
-  color: #fff;
+  color: #ffffff;
   border: none;
   padding: 0.4rem 0.85rem;
   border-radius: 6px;
   font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
+  transition: background-color 0.2s ease;
 }
 
 .btn-accent:hover {
@@ -210,6 +213,7 @@ body {
   border-radius: 6px;
   font-size: 0.8rem;
   cursor: pointer;
+  transition: all 0.2s ease;
 }
 
 .btn-reset:hover {
@@ -234,6 +238,7 @@ body {
   color: var(--text-muted);
   display: flex;
   justify-content: space-between;
+  align-items: center;
 }
 
 .flash-pulse {
@@ -294,6 +299,7 @@ textarea {
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
   color: var(--text-main);
+  transition: border-color 0.2s ease, background-color 0.2s ease;
 }
 
 .btn-sm:hover {
@@ -303,11 +309,12 @@ textarea {
 .btn-sm.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: #ffffff;
 }
 
 .btn-sm.primary:hover {
   background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 /* QR Modal */
@@ -344,7 +351,7 @@ textarea {
 .modal-card canvas {
   border-radius: 8px;
   margin: 1rem 0;
-  background: #fff;
+  background: #ffffff;
   padding: 10px;
 }
 
@@ -370,9 +377,21 @@ textarea {
 }
 
 @media (max-width: 600px) {
-  .hero h1 { font-size: 1.75rem; }
-  .room-bar { flex-direction: column; align-items: stretch; }
-  .room-inputs input { flex: 1; }
-  .editor-bottom { flex-direction: column; align-items: stretch; }
-  .actions { justify-content: flex-end; }
+  .hero h1 {
+    font-size: 1.75rem;
+  }
+  .room-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .room-inputs input {
+    flex: 1;
+  }
+  .editor-bottom {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .actions {
+    justify-content: flex-end;
+  }
 }
