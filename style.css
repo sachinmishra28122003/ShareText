@@ -2,12 +2,16 @@
 :root {
   --bg-app: #0b0f19;
   --bg-card: #111827;
+  --bg-card-subtle: #1f2937;
   --bg-editor: #1f2937;
   --bg-input: #111827;
   --text-main: #f9fafb;
   --text-muted: #9ca3af;
   --border-color: #374151;
+  --border-subtle: #374151;
   --border-focus: #6366f1;
+  --accent: #6366f1;
+  --accent-hover: #4f46e5;
   --primary: #4f46e5;
   --primary-hover: #4338ca;
   --primary-text: #ffffff;
@@ -23,12 +27,16 @@
 [data-theme="light"] {
   --bg-app: #f3f4f6;
   --bg-card: #ffffff;
+  --bg-card-subtle: #f9fafb;
   --bg-editor: #f9fafb;
   --bg-input: #ffffff;
   --text-main: #111827;
   --text-muted: #6b7280;
   --border-color: #e5e7eb;
+  --border-subtle: #e5e7eb;
   --border-focus: #4f46e5;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
   --primary: #4f46e5;
   --primary-hover: #4338ca;
   --primary-text: #ffffff;
@@ -50,6 +58,7 @@ body {
   color: var(--text-main);
   min-height: 100vh;
   display: flex;
+  flex-direction: column;
   justify-content: center;
   align-items: center;
   padding: 1.25rem;
@@ -152,6 +161,95 @@ body {
 
 .icon-btn:hover {
   background-color: var(--secondary-hover);
+}
+
+/* Room Join / Display Strip */
+.room-strip {
+  width: 100%;
+  max-width: 680px;
+  margin: 0 auto 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.room-pill-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 0.45rem 0.9rem;
+  border-radius: 10px;
+}
+
+.room-pill-title {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.room-code-tag {
+  font-family: monospace;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.05em;
+}
+
+.btn-text-link {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0 4px;
+}
+
+.btn-text-link:hover {
+  color: var(--text-main);
+}
+
+.join-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.join-box input {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 0.45rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-family: monospace;
+  outline: none;
+  width: 170px;
+}
+
+.join-box input:focus {
+  border-color: var(--border-focus);
+}
+
+.btn-join {
+  background: var(--bg-card-subtle);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 0.45rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-join:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
 }
 
 /* Editor */
@@ -318,100 +416,21 @@ textarea:focus {
 }
 
 @media (max-width: 480px) {
+  .room-strip {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .join-box {
+    width: 100%;
+  }
+  .join-box input {
+    flex: 1;
+    width: auto;
+  }
   .action-bar {
     flex-direction: column;
   }
   .btn {
     width: 100%;
   }
-}
-
-/* Visible Room Strip */
-.room-strip {
-  max-width: 860px;
-  width: 100%;
-  margin: 0 auto 1.25rem;
-  padding: 0 1rem;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-}
-
-.room-pill-box {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
-  padding: 0.45rem 0.9rem;
-  border-radius: 10px;
-}
-
-.room-pill-title {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-
-.room-code-tag {
-  font-family: monospace;
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: var(--accent);
-  letter-spacing: 0.05em;
-}
-
-.btn-text-link {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  cursor: pointer;
-  text-decoration: underline;
-  padding: 0 4px;
-}
-
-.btn-text-link:hover {
-  color: var(--text-primary);
-}
-
-.join-box {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.join-box input {
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-primary);
-  padding: 0.45rem 0.75rem;
-  border-radius: 8px;
-  font-size: 0.85rem;
-  font-family: monospace;
-  outline: none;
-  width: 170px;
-}
-
-.join-box input:focus {
-  border-color: var(--border-focus);
-}
-
-.btn-join {
-  background: var(--bg-card-subtle);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-primary);
-  padding: 0.45rem 0.85rem;
-  border-radius: 8px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.btn-join:hover {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
 }
