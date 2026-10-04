@@ -1,55 +1,55 @@
-// --- 1. Deterministic Room Management & Peer Resolution ---
-function generateSlug() {
-  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
-  let slug = '';
-  for (let i = 0; i < 6; i++) slug += chars[Math.floor(Math.random() * chars.length)];
-  return slug;
-}
-
-// Parse Room & Target Peer from URL hash (e.g. #fwdctk or #fwdctk:targetPeerId)
-const rawHash = window.location.hash.replace('#', '').trim();
-let activeRoom = '';
-let targetPeerToConnect = '';
-
-if (rawHash.includes(':')) {
-  const parts = rawHash.split(':');
-  activeRoom = parts[0].toLowerCase();
-  targetPeerToConnect = parts[1];
-} else if (rawHash) {
-  activeRoom = rawHash.toLowerCase();
-} else {
-  activeRoom = generateSlug();
-  window.history.replaceState(null, '', '#' + activeRoom);
-}
-
-document.getElementById('roomCodeDisplay').textContent = '#' + activeRoom;
-
-// Reset Room Button
-document.getElementById('resetRoomBtn').addEventListener('click', () => {
-  if (confirm('Start a new room? This will disconnect all devices.')) {
-    localStorage.removeItem('airtext_draft_' + activeRoom);
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    if (peer) {
-      try { peer.destroy(); } catch (e) {}
-    }
-    const fresh = generateSlug();
-    window.location.hash = fresh;
-    window.location.reload();
-  }
-});
-
-// Custom Room Input
-document.getElementById('joinBtn').addEventListener('click', () => {
-  const code = document.getElementById('joinInput').value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
-  if (!code) return;
-  window.location.hash = code;
-  window.location.reload();
-});
-
-// --- 2. Cache Draft ---
+// --- DOM Element References ---
 const editor = document.getElementById('editor');
 const chars = document.getElementById('chars');
-const cacheKey = 'airtext_draft_' + activeRoom;
+const roomCodeDisplay = document.getElementById('roomCodeDisplay');
+const networkText = document.getElementById('networkText');
+const flash = document.getElementById('flash');
+const statusDot = document.getElementById('statusDot');
+const statusLabel = document.getElementById('statusLabel');
+const peerLabel = document.getElementById('peerLabel');
+const clearBtn = document.getElementById('clearBtn');
+const copyBtn = document.getElementById('copyBtn');
+const copyLinkBtn = document.getElementById('copyLinkBtn');
+const resetRoomBtn = document.getElementById('resetRoomBtn');
+const joinInput = document.getElementById('joinInput');
+const joinBtn = document.getElementById('joinBtn');
+const qrBtn = document.getElementById('qrBtn');
+const qrModal = document.getElementById('qrModal');
+const closeModalBtn = document.getElementById('closeModalBtn');
+const qrCanvas = document.getElementById('qrCanvas');
+const themeBtn = document.getElementById('themeBtn');
+const toast = document.getElementById('toast');
+
+// --- 1. Deterministic Room Identity ---
+function generateRoomCode() {
+  const charSet = 'abcdefghjkmnpqrstuvwxyz23456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += charSet.charAt(Math.floor(Math.random() * charSet.length));
+  }
+  return result;
+}
+
+function resolveRoomCode() {
+  const hash = window.location.hash.replace('#', '').trim();
+  if (hash) {
+    return hash.toLowerCase();
+  }
+  const newCode = generateRoomCode();
+  window.history.replaceState(null, '', `#${newCode}`);
+  return newCode;
+}
+
+let activeRoomCode = resolveRoomCode();
+roomCodeDisplay.textContent = `#${activeRoomCode}`;
+
+function getFullShareUrl() {
+  const base = window.location.origin + window.location.pathname;
+  return `${base}#${activeRoomCode}`;
+}
+
+// Local Storage Draft Cache
+const cacheKey = `airtext_cache_${activeRoomCode}`;
 editor.value = localStorage.getItem(cacheKey) || '';
 updateCharCount();
 
@@ -57,235 +57,238 @@ function updateCharCount() {
   chars.textContent = `${editor.value.length} characters`;
 }
 
-// --- 3. Robust WebRTC Engine with TURN + STUN ---
-const statusDot = document.getElementById('statusDot');
-const statusLabel = document.getElementById('statusLabel');
-const networkText = document.getElementById('networkText');
-const peerLabel = document.getElementById('peerLabel');
-const flash = document.getElementById('flash');
+// Device identifier
+const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
+const myDeviceLabel = isMobile ? 'Mobile Phone' : 'Laptop / PC';
 
+// --- 2. Multi-User WebRTC Relay Engine ---
 let peer = null;
-let activeConnection = null;
-let remoteTyping = false;
-let heartbeatTimer = null;
-let myCurrentPeerId = '';
+let connections = new Map(); // Stores all active peer channels
+let isRemoteInput = false;
+let isHost = false;
 
-// Google STUN + OpenRelay TURN for mobile cellular-to-Wi-Fi traversal
-const rtcConfig = {
+const peerConfig = {
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelay',
-        credential: 'openrelay'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelay',
-        credential: 'openrelay'
-      }
+      { urls: 'stun:stun2.l.google.com:19302' }
     ]
   }
 };
 
-function initP2P() {
+function connectToRoom(roomCode) {
   if (peer) {
     try { peer.destroy(); } catch (e) {}
   }
+  connections.clear();
+  updateStatus(false, 'Connecting...');
+  networkText.textContent = 'Connecting to signaling network...';
 
-  // Create a clean, unique peer ID for this session
-  const randomSuffix = Math.random().toString(36).substring(2, 7);
-  
-  // If user scanned a QR code with target peer, register as guest and connect directly
-  if (targetPeerToConnect) {
-    myCurrentPeerId = `airtext-${activeRoom}-g-${randomSuffix}`;
-    peer = new Peer(myCurrentPeerId, rtcConfig);
+  const hostPeerId = `airtext-room-${roomCode}-host`;
+  const guestPeerId = `airtext-room-${roomCode}-guest-${Math.random().toString(36).substring(2, 7)}`;
 
-    peer.on('open', () => {
-      networkText.textContent = 'Pairing with room host...';
-      statusLabel.textContent = 'Connecting...';
-      const conn = peer.connect(targetPeerToConnect, { reliable: true });
-      setupDataChannel(conn);
-    });
+  // 1. Attempt to register as Host
+  peer = new Peer(hostPeerId, peerConfig);
 
-    peer.on('error', (err) => {
+  peer.on('open', () => {
+    isHost = true;
+    updateStatus(false, 'Room ready • Waiting for peers...');
+    networkText.textContent = 'Room coordinator ready. Share QR or link!';
+    updatePeerCount();
+  });
+
+  peer.on('error', (err) => {
+    // If Host slot is taken, join as a new guest and link to the Host
+    if (err.type === 'unavailable-id') {
+      isHost = false;
+      peer.destroy();
+      peer = new Peer(guestPeerId, peerConfig);
+
+      peer.on('open', () => {
+        updateStatus(false, 'Joining room...');
+        networkText.textContent = 'Connecting to room host...';
+        const conn = peer.connect(hostPeerId, { reliable: true });
+        setupConnectionEvents(conn);
+      });
+
+      peer.on('error', (clientErr) => {
+        console.error('Client peer error:', clientErr);
+        updateStatus(false, 'Connection error');
+      });
+    } else {
       console.warn('Peer error:', err);
-      networkText.textContent = 'Host offline. Scan fresh QR code.';
-    });
-  } else {
-    // Primary room creator: claim deterministic host ID or unique slot
-    const hostId = `airtext-${activeRoom}-h`;
-    peer = new Peer(hostId, rtcConfig);
+    }
+  });
 
-    peer.on('open', (id) => {
-      myCurrentPeerId = id;
-      networkText.textContent = 'Ready. Scan QR with your phone/iPad.';
-      statusLabel.textContent = 'Waiting';
-    });
-
-    peer.on('error', (err) => {
-      // If host ID is currently occupied, take a unique guest ID and connect to it
-      if (err.type === 'unavailable-id') {
-        peer.destroy();
-        myCurrentPeerId = `airtext-${activeRoom}-g-${randomSuffix}`;
-        peer = new Peer(myCurrentPeerId, rtcConfig);
-
-        peer.on('open', (id) => {
-          myCurrentPeerId = id;
-          networkText.textContent = 'Joining room host...';
-          const conn = peer.connect(hostId, { reliable: true });
-          setupDataChannel(conn);
-        });
-      }
-    });
-  }
-
-  // Handle incoming connections from scanning devices
+  // When new devices join the Host
   peer.on('connection', (conn) => {
-    setupDataChannel(conn);
+    setupConnectionEvents(conn);
   });
 }
 
-function setupDataChannel(conn) {
-  activeConnection = conn;
-
+function setupConnectionEvents(conn) {
   conn.on('open', () => {
-    statusDot.classList.add('active');
-    statusLabel.textContent = 'Synced';
-    networkText.textContent = 'Direct WebRTC P2P Active';
-    peerLabel.textContent = '1 device connected';
-    notify('Device connected!');
+    connections.set(conn.peer, conn);
+    updatePeerCount();
+    conn.send({ type: 'HANDSHAKE', device: myDeviceLabel });
 
-    // Push local draft to connected peer
+    // Sync current editor state to the newcomer
     if (editor.value) {
       conn.send({ type: 'SYNC_TEXT', text: editor.value });
-    }
-
-    // Keep-alive ping to prevent mobile browser sleeping WebRTC
-    if (!heartbeatTimer) {
-      heartbeatTimer = setInterval(() => {
-        if (activeConnection && activeConnection.open) {
-          activeConnection.send({ type: 'PING' });
-        }
-      }, 4000);
     }
   });
 
   conn.on('data', (data) => {
     if (!data) return;
 
-    if (data.type === 'PING') return;
-
-    if (data.type === 'SYNC_TEXT') {
-      remoteTyping = true;
+    if (data.type === 'HANDSHAKE') {
+      showToast(`Joined: ${data.device}`);
+    } else if (data.type === 'SYNC_TEXT') {
+      isRemoteInput = true;
       editor.value = data.text;
       localStorage.setItem(cacheKey, data.text);
       updateCharCount();
-      triggerPulse();
-      remoteTyping = false;
+      triggerArrivalAnimation();
+      isRemoteInput = false;
+
+      // Broadcast relay: If this machine is the Host, forward changes to all other peers
+      if (isHost) {
+        connections.forEach((peerConn, peerId) => {
+          if (peerId !== conn.peer && peerConn.open) {
+            peerConn.send(data);
+          }
+        });
+      }
     }
   });
 
   conn.on('close', () => {
-    statusDot.classList.remove('active');
-    statusLabel.textContent = 'Standby';
-    peerLabel.textContent = '0 devices connected';
-    networkText.textContent = 'Device disconnected. Waiting...';
-    activeConnection = null;
+    connections.delete(conn.peer);
+    updatePeerCount();
   });
 
-  conn.on('error', (err) => {
-    console.warn('Channel error:', err);
-    statusDot.classList.remove('active');
-    peerLabel.textContent = '0 devices connected';
-    activeConnection = null;
+  conn.on('error', () => {
+    connections.delete(conn.peer);
+    updatePeerCount();
   });
 }
 
-function triggerPulse() {
+function updatePeerCount() {
+  const count = connections.size;
+  peerLabel.textContent = `${count} device${count === 1 ? '' : 's'} connected`;
+  
+  if (count > 0) {
+    updateStatus(true, 'Direct P2P Synced');
+    networkText.textContent = `Direct P2P Active (${count} connected)`;
+  } else {
+    updateStatus(false, isHost ? 'Waiting for peers...' : 'Disconnected');
+    networkText.textContent = isHost ? 'Room open. Waiting for peers...' : 'Reconnecting...';
+  }
+}
+
+function updateStatus(isLive, label) {
+  statusDot.className = 'status-dot' + (isLive ? ' active' : '');
+  statusLabel.textContent = label;
+}
+
+function triggerArrivalAnimation() {
   flash.classList.add('show');
-  setTimeout(() => flash.classList.remove('show'), 900);
+  setTimeout(() => flash.classList.remove('show'), 1000);
 }
 
-// Ensure clean socket disconnect
+// Clean up socket on window unload
 window.addEventListener('beforeunload', () => {
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
-  if (peer) peer.destroy();
+  if (peer) {
+    try { peer.destroy(); } catch (e) {}
+  }
 });
 
-// --- 4. Input Sync ---
-let debounceTimer;
+// --- 3. Typing Sync with Broadcast ---
+let typingTimer;
 editor.addEventListener('input', () => {
   updateCharCount();
   localStorage.setItem(cacheKey, editor.value);
 
-  if (remoteTyping || !activeConnection || !activeConnection.open) return;
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => {
-    activeConnection.send({ type: 'SYNC_TEXT', text: editor.value });
-  }, 80);
+  if (isRemoteInput || connections.size === 0) return;
+
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(() => {
+    const payload = { type: 'SYNC_TEXT', text: editor.value };
+    connections.forEach((conn) => {
+      if (conn.open) conn.send(payload);
+    });
+  }, 90);
 });
 
-// --- 5. Actions & Buttons ---
-document.getElementById('copyBtn').addEventListener('click', async () => {
-  if (!editor.value) return;
-  await navigator.clipboard.writeText(editor.value);
-  notify('Prompt copied!');
-});
-
-document.getElementById('clearBtn').addEventListener('click', () => {
-  editor.value = '';
-  updateCharCount();
-  localStorage.removeItem(cacheKey);
-  if (activeConnection && activeConnection.open) {
-    activeConnection.send({ type: 'SYNC_TEXT', text: '' });
+// --- 4. Room Navigation & Action Buttons ---
+resetRoomBtn.addEventListener('click', () => {
+  if (confirm('Start a new room? This will disconnect all peers.')) {
+    localStorage.removeItem(cacheKey);
+    if (peer) {
+      try { peer.destroy(); } catch (e) {}
+    }
+    const freshCode = generateRoomCode();
+    window.location.hash = freshCode;
+    window.location.reload();
   }
 });
 
-// Generates direct share URL with active peer ID embedded
-function getDirectShareUrl() {
-  const base = `${window.location.origin}${window.location.pathname}#${activeRoom}`;
-  return myCurrentPeerId ? `${base}:${myCurrentPeerId}` : base;
-}
-
-document.getElementById('copyLinkBtn').addEventListener('click', async () => {
-  await navigator.clipboard.writeText(getDirectShareUrl());
-  notify('Direct room link copied!');
+joinBtn.addEventListener('click', () => {
+  const code = joinInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  if (!code) return;
+  window.location.hash = code;
+  window.location.reload();
 });
 
-// --- 6. QR Modal Handler ---
-const qrModal = document.getElementById('qrModal');
-const qrContainer = document.getElementById('qrCanvas');
+copyBtn.addEventListener('click', async () => {
+  if (!editor.value) return;
+  await navigator.clipboard.writeText(editor.value);
+  showToast('Copied to clipboard!');
+});
 
-document.getElementById('qrBtn').addEventListener('click', () => {
-  qrContainer.innerHTML = '';
-  const directUrl = getDirectShareUrl();
+clearBtn.addEventListener('click', () => {
+  editor.value = '';
+  updateCharCount();
+  localStorage.removeItem(cacheKey);
+  const payload = { type: 'SYNC_TEXT', text: '' };
+  connections.forEach((conn) => {
+    if (conn.open) conn.send(payload);
+  });
+});
 
-  if (typeof QRCode !== 'undefined') {
-    new QRCode(qrContainer, {
-      text: directUrl,
+copyLinkBtn.addEventListener('click', async () => {
+  await navigator.clipboard.writeText(getFullShareUrl());
+  showToast('Room link copied!');
+});
+
+// --- 5. QR Code Handling ---
+qrBtn.addEventListener('click', () => {
+  qrCanvas.innerHTML = '';
+  const shareUrl = getFullShareUrl();
+
+  if (typeof window.QRCode !== 'undefined') {
+    new window.QRCode(qrCanvas, {
+      text: shareUrl,
       width: 180,
       height: 180,
       colorDark: '#0a0b0e',
       colorLight: '#ffffff',
-      correctLevel: QRCode.CorrectLevel.M
+      correctLevel: window.QRCode.CorrectLevel.M
     });
   } else {
     const fallbackImg = document.createElement('img');
-    fallbackImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(directUrl)}`;
+    fallbackImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(shareUrl)}`;
     fallbackImg.alt = 'QR Code';
     fallbackImg.style.width = '180px';
     fallbackImg.style.height = '180px';
-    qrContainer.appendChild(fallbackImg);
+    qrCanvas.appendChild(fallbackImg);
   }
 
   qrModal.classList.add('open');
 });
 
-document.getElementById('closeModalBtn').addEventListener('click', () => {
+closeModalBtn.addEventListener('click', () => {
   qrModal.classList.remove('open');
 });
 
@@ -295,20 +298,24 @@ qrModal.addEventListener('click', (e) => {
   }
 });
 
-// --- 7. Theme Switcher & Toast ---
-const themeBtn = document.getElementById('themeBtn');
+// --- 6. Theme Toggle & Toast Notifications ---
+const savedTheme = localStorage.getItem('airtext_theme') || 'dark';
+document.documentElement.setAttribute('data-theme', savedTheme);
+themeBtn.textContent = savedTheme === 'dark' ? '🌙' : '☀';
+
 themeBtn.addEventListener('click', () => {
-  const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-  document.documentElement.setAttribute('data-theme', isDark ? 'light' : 'dark');
-  themeBtn.textContent = isDark ? '☀' : '🌙';
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('airtext_theme', next);
+  themeBtn.textContent = next === 'dark' ? '🌙' : '☀';
 });
 
-function notify(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2000);
+function showToast(text) {
+  toast.textContent = text;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 2000);
 }
 
-// Start
-initP2P();
+// Start peer connection with active room
+connectToRoom(activeRoomCode);
