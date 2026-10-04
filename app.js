@@ -16,11 +16,10 @@ if (!activeRoom) {
 
 document.getElementById('roomCodeDisplay').textContent = '#' + activeRoom;
 
-// Reset Room Button: Cleans memory, tears down WebRTC, issues fresh slug
+// Reset Room Button: Cleans memory, tears down WebRTC, forces fresh room
 document.getElementById('resetRoomBtn').addEventListener('click', () => {
-  if (confirm('Start a new room? This will disconnect all peers in this room.')) {
+  if (confirm('Start a new room? This will disconnect all devices.')) {
     localStorage.removeItem('airtext_draft_' + activeRoom);
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (peer) {
       try { peer.destroy(); } catch (e) {}
     }
@@ -49,7 +48,7 @@ function updateCharCount() {
   chars.textContent = `${editor.value.length} characters`;
 }
 
-// --- 3. Multi-Client WebRTC Mesh Network ---
+// --- 3. The Earlier Proven Bidirectional WebRTC Engine ---
 const statusDot = document.getElementById('statusDot');
 const statusLabel = document.getElementById('statusLabel');
 const networkText = document.getElementById('networkText');
@@ -57,176 +56,137 @@ const peerLabel = document.getElementById('peerLabel');
 const flash = document.getElementById('flash');
 
 let peer = null;
-let connections = new Map();
-let remoteTyping = false;
-let heartbeatTimer = null;
+let activeConnection = null;
+let isRemoteInput = false;
 
-// Multi-server STUN list for resilient NAT traversal across cellular & Wi-Fi
+// Fixed room peer roles matching the earlier working code
+const hostId = `airtext-h-${activeRoom}`;
+const clientId = `airtext-c-${activeRoom}`;
+
+// Fallback Google STUN servers
 const rtcConfig = {
-  debug: 1,
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' }
+      { urls: 'stun:stun2.l.google.com:19302' }
     ]
   }
 };
 
-function startPeerMesh() {
+function initP2P() {
   if (peer) {
     try { peer.destroy(); } catch (e) {}
   }
-  connections.clear();
 
-  const hostId = `airtext-room-${activeRoom}-host`;
-  const guestId = `airtext-room-${activeRoom}-peer-${Math.random().toString(36).substring(2, 8)}`;
-
-  // Step 1: Attempt Host registration
+  // Device 1 registers as host
   peer = new Peer(hostId, rtcConfig);
 
   peer.on('open', () => {
-    networkText.textContent = 'Room coordinator ready. Share QR or link!';
-    updatePeerCountUI();
+    updateStatus(false, 'Standby • Waiting for other device...');
+    networkText.textContent = 'Room open. Scan QR on second device.';
   });
 
   peer.on('error', (err) => {
-    // If host ID is already taken, this device becomes a peer and joins the host
+    // If host ID exists, Device 2 registers as client and connects immediately
     if (err.type === 'unavailable-id') {
       peer.destroy();
-      peer = new Peer(guestId, rtcConfig);
+      peer = new Peer(clientId, rtcConfig);
 
       peer.on('open', () => {
-        networkText.textContent = 'Connecting to room...';
-        connectToHost(hostId);
+        updateStatus(false, 'Connecting to host...');
+        networkText.textContent = 'Connecting...';
+        const conn = peer.connect(hostId, { reliable: true });
+        bindChannel(conn);
       });
 
-      peer.on('error', (guestErr) => {
-        console.warn('Guest peer error:', guestErr);
-        networkText.textContent = 'Connection error. Retrying...';
+      peer.on('error', (e) => {
+        console.warn('Client peer error:', e);
       });
     } else {
       console.warn('Peer error:', err);
     }
   });
 
-  // When a guest connects to this host
+  // When Device 1 receives incoming connection from Device 2
   peer.on('connection', (conn) => {
-    setupDataChannel(conn);
+    bindChannel(conn);
   });
 }
 
-function connectToHost(hostId) {
-  const conn = peer.connect(hostId, {
-    reliable: true
-  });
+function bindChannel(conn) {
+  activeConnection = conn;
 
-  setupDataChannel(conn);
-}
-
-function setupDataChannel(conn) {
   conn.on('open', () => {
-    connections.set(conn.peer, conn);
-    updatePeerCountUI();
+    updateStatus(true, 'Direct P2P Synced');
+    networkText.textContent = 'Direct P2P Synced';
+    peerLabel.textContent = '1 device connected';
 
-    // Push initial draft state
+    // Push initial text on connection
     if (editor.value) {
       conn.send({ type: 'SYNC_TEXT', text: editor.value });
-    }
-
-    // Keep-alive ping every 5 seconds to prevent mobile browser sleep
-    if (!heartbeatTimer) {
-      heartbeatTimer = setInterval(() => {
-        connections.forEach((c) => {
-          if (c.open) c.send({ type: 'PING' });
-        });
-      }, 5000);
     }
   });
 
   conn.on('data', (data) => {
     if (!data) return;
 
-    if (data.type === 'PING') {
-      return;
-    }
-
     if (data.type === 'SYNC_TEXT') {
-      remoteTyping = true;
+      isRemoteInput = true;
       editor.value = data.text;
       localStorage.setItem(cacheKey, data.text);
       updateCharCount();
       triggerPulse();
-      remoteTyping = false;
-
-      // If host, relay to other peers
-      if (peer && peer.id && peer.id.endsWith('-host')) {
-        connections.forEach((c, id) => {
-          if (id !== conn.peer && c.open) {
-            c.send(data);
-          }
-        });
-      }
+      isRemoteInput = false;
     }
   });
 
   conn.on('close', () => {
-    connections.delete(conn.peer);
-    updatePeerCountUI();
+    updateStatus(false, 'Peer disconnected');
+    peerLabel.textContent = '0 devices connected';
+    networkText.textContent = 'Device left. Waiting...';
+    activeConnection = null;
   });
 
-  conn.on('error', (e) => {
-    console.warn('DataChannel error:', e);
-    connections.delete(conn.peer);
-    updatePeerCountUI();
+  conn.on('error', () => {
+    updateStatus(false, 'Connection error');
+    peerLabel.textContent = '0 devices connected';
+    activeConnection = null;
   });
 }
 
-function updatePeerCountUI() {
-  const count = connections.size;
-  peerLabel.textContent = `${count} device${count === 1 ? '' : 's'} connected`;
-  
-  if (count > 0) {
-    statusDot.classList.add('active');
-    statusLabel.textContent = 'Synced';
-    networkText.textContent = `Direct P2P Active (${count} connected)`;
-  } else {
-    statusDot.classList.remove('active');
-    statusLabel.textContent = 'Waiting';
-    networkText.textContent = 'Waiting for other devices to scan or join...';
-  }
+function updateStatus(isLive, label) {
+  statusDot.className = 'status-dot' + (isLive ? ' active' : '');
+  statusLabel.textContent = label;
 }
 
 function triggerPulse() {
   flash.classList.add('show');
-  setTimeout(() => flash.classList.remove('show'), 900);
+  setTimeout(() => flash.classList.remove('show'), 1000);
 }
 
-// Clean up peer socket on close
+// Ensure socket is released when closing browser tab
 window.addEventListener('beforeunload', () => {
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (peer) peer.destroy();
 });
 
-// --- 4. Input Sync (Broadcasts to all connected peers) ---
-let debounceTimer;
+// --- 4. Input Sync ---
+let typingTimer;
 editor.addEventListener('input', () => {
   updateCharCount();
   localStorage.setItem(cacheKey, editor.value);
 
-  if (remoteTyping) return;
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => {
-    const payload = { type: 'SYNC_TEXT', text: editor.value };
-    connections.forEach((c) => {
-      if (c.open) c.send(payload);
-    });
+  if (isRemoteInput || !activeConnection) return;
+
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(() => {
+    if (activeConnection.open) {
+      activeConnection.send({ type: 'SYNC_TEXT', text: editor.value });
+    }
   }, 100);
 });
 
-// --- 5. Actions & Modal Logic ---
+// --- 5. Actions & Buttons ---
 document.getElementById('copyBtn').addEventListener('click', async () => {
   if (!editor.value) return;
   await navigator.clipboard.writeText(editor.value);
@@ -237,10 +197,9 @@ document.getElementById('clearBtn').addEventListener('click', () => {
   editor.value = '';
   updateCharCount();
   localStorage.removeItem(cacheKey);
-  const payload = { type: 'SYNC_TEXT', text: '' };
-  connections.forEach((c) => {
-    if (c.open) c.send(payload);
-  });
+  if (activeConnection && activeConnection.open) {
+    activeConnection.send({ type: 'SYNC_TEXT', text: '' });
+  }
 });
 
 document.getElementById('copyLinkBtn').addEventListener('click', async () => {
@@ -254,20 +213,20 @@ const qrContainer = document.getElementById('qrCanvas');
 
 document.getElementById('qrBtn').addEventListener('click', () => {
   qrContainer.innerHTML = '';
-  const shareUrl = window.location.href;
+  const currentUrl = window.location.href;
 
-  if (typeof window.QRCode !== 'undefined') {
-    new window.QRCode(qrContainer, {
-      text: shareUrl,
+  if (typeof QRCode !== 'undefined') {
+    new QRCode(qrContainer, {
+      text: currentUrl,
       width: 180,
       height: 180,
       colorDark: '#0a0b0e',
       colorLight: '#ffffff',
-      correctLevel: window.QRCode.CorrectLevel.M
+      correctLevel: QRCode.CorrectLevel.M
     });
   } else {
     const fallbackImg = document.createElement('img');
-    fallbackImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(shareUrl)}`;
+    fallbackImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(currentUrl)}`;
     fallbackImg.alt = 'QR Code';
     fallbackImg.style.width = '180px';
     fallbackImg.style.height = '180px';
@@ -302,5 +261,5 @@ function notify(msg) {
   setTimeout(() => t.classList.remove('show'), 2000);
 }
 
-// Start Mesh Network
-startPeerMesh();
+// Start P2P Engine
+initP2P();
