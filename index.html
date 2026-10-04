@@ -3,14 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AirText — Instant P2P Sync</title>
-  
-  <!-- Cache-busted Stylesheet -->
-  <link rel="stylesheet" href="./style.css?v=1.0.4" />
+  <title>AirText — Instant P2P Sync & Transfer</title>
+  <link rel="stylesheet" href="./style.css?v=2.0.0" />
   
   <!-- PeerJS for WebRTC Mesh -->
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
-  <!-- Fast, Reliable QR Code Library -->
+  <!-- Fast QR Code Library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
@@ -31,8 +29,8 @@
   <!-- Main Container -->
   <main class="workspace">
     <header class="hero">
-      <h1>Share Text Instantly</h1>
-      <p>Multi-device WebRTC sync. Type or paste below to mirror in real time.</p>
+      <h1>Share Text & Files Instantly</h1>
+      <p>Direct WebRTC P2P sync. Real-time text mirror and encrypted file sharing.</p>
     </header>
 
     <!-- Room Control Bar -->
@@ -41,21 +39,25 @@
         <span>Room:</span>
         <span class="room-code" id="roomCodeDisplay">...</span>
         <button class="nav-btn" id="copyLinkBtn">Copy Link</button>
-        <button class="btn-reset" id="resetRoomBtn" title="Destroy session and start fresh">Reset Room 🔄</button>
+        <button class="btn-reset" id="resetRoomBtn" title="Reset room and clear cache">Reset Room 🔄</button>
       </div>
       <div class="room-inputs">
-        <input type="text" id="joinInput" placeholder="Join room..." maxlength="20" />
-        <button class="btn-accent" id="joinBtn">Set</button>
+        <input type="text" id="joinInput" placeholder="Join room code..." maxlength="20" />
+        <button class="btn-accent" id="joinBtn">Join</button>
       </div>
     </section>
 
-    <!-- Notepad Card -->
-    <section class="editor-container">
+    <!-- Notepad & File Transfer Card -->
+    <section class="editor-container" id="editorCard">
       <div class="editor-top">
-        <span id="networkText">Connecting to room...</span>
+        <span id="networkText">Initializing network...</span>
         <span class="flash-pulse" id="flash">Synced</span>
       </div>
-      <textarea id="editor" placeholder="Type prompt or code here..." spellcheck="false"></textarea>
+      <textarea id="editor" placeholder="Type prompt, notes, or code here..." spellcheck="false"></textarea>
+      
+      <!-- Received / Sent Files Deck -->
+      <div class="files-deck" id="filesDeck"></div>
+
       <div class="editor-bottom">
         <div class="meta">
           <span id="chars">0 characters</span>
@@ -63,26 +65,27 @@
           <span id="peerLabel">0 devices connected</span>
         </div>
         <div class="actions">
+          <input type="file" id="fileInput" style="display: none;" />
+          <button class="btn-sm" id="sendFileBtn" title="Send a file to connected device">📎 Send File</button>
           <button class="btn-sm" id="clearBtn">Clear</button>
-          <button class="btn-sm primary" id="copyBtn">Copy Prompt</button>
+          <button class="btn-sm primary" id="copyBtn">Copy Text</button>
         </div>
       </div>
     </section>
   </main>
 
-  <!-- QR Modal -->
+  <!-- QR Pairing Modal -->
   <div class="modal-wrap" id="qrModal" role="dialog" aria-modal="true">
     <div class="modal-card">
-      <h3>Scan to Join Room</h3>
-      <p class="modal-sub">Share this QR code with your mobile or second device</p>
-      <div id="qrCanvas" style="display: flex; justify-content: center; margin: 1rem 0;"></div>
+      <h3>Scan to Pair Device</h3>
+      <p class="modal-sub">Scan with phone camera to connect automatically</p>
+      <div id="qrCanvas"></div>
       <button class="btn-sm" id="closeModalBtn" style="width: 100%;">Close</button>
     </div>
   </div>
 
   <div class="toast" id="toast"></div>
 
-  <!-- App logic loaded after external libraries -->
-  <script src="./app.js?v=1.0.4"></script>
+  <script src="./app.js?v=2.0.0"></script>
 </body>
 </html>
