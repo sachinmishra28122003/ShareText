@@ -1,4 +1,4 @@
-// --- DOM Element References ---
+// --- DOM Elements ---
 const editor = document.getElementById('editor');
 const chars = document.getElementById('chars');
 const roomCodeDisplay = document.getElementById('roomCodeDisplay');
@@ -19,6 +19,9 @@ const closeModalBtn = document.getElementById('closeModalBtn');
 const qrCanvas = document.getElementById('qrCanvas');
 const themeBtn = document.getElementById('themeBtn');
 const toast = document.getElementById('toast');
+const sendFileBtn = document.getElementById('sendFileBtn');
+const fileInput = document.getElementById('fileInput');
+const filesDeck = document.getElementById('filesDeck');
 
 // --- 1. Dynamic Room & Direct Target Parser ---
 function generateSlug() {
@@ -30,17 +33,16 @@ function generateSlug() {
   return result;
 }
 
-// Format: #roomName or #roomName:targetPeerId
-const hashRaw = window.location.hash.replace('#', '').trim();
+const rawHash = window.location.hash.replace('#', '').trim();
 let activeRoom = '';
-let targetPeerToConnect = '';
+let targetPeerId = '';
 
-if (hashRaw.includes(':')) {
-  const parts = hashRaw.split(':');
+if (rawHash.includes(':')) {
+  const parts = rawHash.split(':');
   activeRoom = parts[0].toLowerCase();
-  targetPeerToConnect = parts[1];
-} else if (hashRaw) {
-  activeRoom = hashRaw.toLowerCase();
+  targetPeerId = parts[1];
+} else if (rawHash) {
+  activeRoom = rawHash.toLowerCase();
 } else {
   activeRoom = generateSlug();
   window.history.replaceState(null, '', `#${activeRoom}`);
@@ -56,24 +58,30 @@ function updateCharCount() {
   chars.textContent = `${editor.value.length} characters`;
 }
 
-const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
-const myDeviceLabel = isMobile ? 'Mobile Phone' : 'Laptop / PC';
-
-// --- 2. Guaranteed Peer Connection Engine ---
+// --- 2. Guaranteed WebRTC Engine with TURN + STUN ---
 let peer = null;
 let activeConnection = null;
-let mySessionPeerId = '';
+let myPeerId = '';
 let isRemoteInput = false;
-let heartbeatTimer = null;
+let pingTimer = null;
 
-// Multi-server STUN configuration
+// Multi-server STUN + Public TURN relays (Crucial for Cellular vs Wi-Fi NAT punching)
 const peerConfig = {
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' }
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelay',
+        credential: 'openrelay'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelay',
+        credential: 'openrelay'
+      }
     ]
   }
 };
@@ -83,36 +91,37 @@ function initP2P() {
     try { peer.destroy(); } catch (e) {}
   }
 
-  // Generate an ID that avoids cloud server collisions
-  const sessionToken = Math.random().toString(36).substring(2, 8);
-  mySessionPeerId = `airtext-${activeRoom}-${sessionToken}`;
+  // Generate a collision-free ID for this session
+  const randomSuffix = Math.random().toString(36).substring(2, 8);
+  myPeerId = `airtext-${activeRoom}-${randomSuffix}`;
 
-  peer = new Peer(mySessionPeerId, peerConfig);
+  peer = new Peer(myPeerId, peerConfig);
 
   peer.on('open', (id) => {
-    mySessionPeerId = id;
+    myPeerId = id;
 
-    if (targetPeerToConnect) {
-      // Scanned from QR: connect directly to the target peer ID
-      updateStatus(false, 'Connecting to peer...');
+    if (targetPeerId) {
+      // Scanned from QR: Connect directly to the specific host peer
+      updateStatus(false, 'Connecting...');
       networkText.textContent = 'Pairing directly with host...';
-      const conn = peer.connect(targetPeerToConnect, { reliable: true });
+      const conn = peer.connect(targetPeerId, { reliable: true });
       bindDataChannel(conn);
     } else {
-      // Room host: waiting for connection
-      updateStatus(false, 'Waiting for device...');
-      networkText.textContent = 'Room open. Scan QR on second device.';
+      // Room host: Wait for incoming device
+      updateStatus(false, 'Waiting');
+      networkText.textContent = 'Ready. Scan QR with your 2nd device!';
       peerLabel.textContent = '0 devices connected';
     }
   });
 
+  // Listen for incoming connection from QR-scanned device
   peer.on('connection', (conn) => {
     bindDataChannel(conn);
   });
 
   peer.on('error', (err) => {
     console.warn('Signaling error:', err);
-    networkText.textContent = 'Signaling issue. Click Reset Room.';
+    networkText.textContent = 'Network notice: ' + (err.type || 'Connection issue');
   });
 }
 
@@ -120,23 +129,23 @@ function bindDataChannel(conn) {
   activeConnection = conn;
 
   conn.on('open', () => {
-    updateStatus(true, 'Direct P2P Synced');
+    updateStatus(true, 'Synced');
     networkText.textContent = 'Direct WebRTC P2P Active';
     peerLabel.textContent = '1 device connected';
     showToast('Device connected!');
 
-    conn.send({ type: 'HANDSHAKE', device: myDeviceLabel });
-
+    // Push initial draft
     if (editor.value) {
       conn.send({ type: 'SYNC_TEXT', text: editor.value });
     }
 
-    if (!heartbeatTimer) {
-      heartbeatTimer = setInterval(() => {
+    // Keep-alive ping every 4s to prevent mobile browser sleep
+    if (!pingTimer) {
+      pingTimer = setInterval(() => {
         if (activeConnection && activeConnection.open) {
           activeConnection.send({ type: 'PING' });
         }
-      }, 3500);
+      }, 4000);
     }
   });
 
@@ -144,16 +153,16 @@ function bindDataChannel(conn) {
     if (!data) return;
     if (data.type === 'PING') return;
 
-    if (data.type === 'HANDSHAKE') {
-      showToast(`Linked with ${data.device}`);
-      peerLabel.textContent = `Linked: ${data.device}`;
-    } else if (data.type === 'SYNC_TEXT') {
+    if (data.type === 'SYNC_TEXT') {
       isRemoteInput = true;
       editor.value = data.text;
       localStorage.setItem(cacheKey, data.text);
       updateCharCount();
       triggerPulse();
       isRemoteInput = false;
+    } else if (data.type === 'SYNC_FILE') {
+      addFileCard(data.name, data.size, data.data, false);
+      showToast(`Received ${data.name}`);
     }
   });
 
@@ -178,16 +187,16 @@ function updateStatus(isLive, label) {
 
 function triggerPulse() {
   flash.classList.add('show');
-  setTimeout(() => flash.classList.remove('show'), 1000);
+  setTimeout(() => flash.classList.remove('show'), 900);
 }
 
-// --- 3. URL Generator for Direct Pair ---
+// Generate direct pair URL embedding this machine's exact active ID
 function getDirectPairUrl() {
   const base = `${window.location.origin}${window.location.pathname}#${activeRoom}`;
-  return mySessionPeerId ? `${base}:${mySessionPeerId}` : base;
+  return myPeerId ? `${base}:${myPeerId}` : base;
 }
 
-// --- 4. Input Sync ---
+// --- 3. Input Sync ---
 let typingTimer;
 editor.addEventListener('input', () => {
   updateCharCount();
@@ -201,16 +210,64 @@ editor.addEventListener('input', () => {
   }, 80);
 });
 
-// --- 5. Controls & Modals ---
+// --- 4. File Sharing Implementation ---
+sendFileBtn.addEventListener('click', () => {
+  if (!activeConnection || !activeConnection.open) {
+    showToast('Wait until devices are linked before sending files');
+    return;
+  }
+  fileInput.click();
+});
+
+fileInput.addEventListener('change', () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const payload = {
+      type: 'SYNC_FILE',
+      name: file.name,
+      size: formatFileSize(file.size),
+      data: reader.result
+    };
+    activeConnection.send(payload);
+    addFileCard(file.name, payload.size, reader.result, true);
+    showToast(`Sent ${file.name}`);
+  };
+  reader.readAsDataURL(file);
+  fileInput.value = '';
+});
+
+function addFileCard(name, size, dataUri, isSelf) {
+  const card = document.createElement('div');
+  card.className = 'file-item';
+  card.innerHTML = `
+    <div>
+      <span class="file-name">${isSelf ? '📤 ' : '📥 '}${name}</span>
+      <span class="file-size">(${size})</span>
+    </div>
+    <a href="${dataUri}" download="${name}" class="file-download">Download</a>
+  `;
+  filesDeck.prepend(card);
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+// --- 5. Controls & Action Buttons ---
 resetRoomBtn.addEventListener('click', () => {
   if (confirm('Start a new room? This will disconnect current peers.')) {
     localStorage.removeItem(cacheKey);
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (pingTimer) clearInterval(pingTimer);
     if (peer) {
       try { peer.destroy(); } catch (e) {}
     }
-    const fresh = generateSlug();
-    window.location.hash = fresh;
+    const freshSlug = generateSlug();
+    window.location.hash = freshSlug;
     window.location.reload();
   }
 });
@@ -239,7 +296,7 @@ clearBtn.addEventListener('click', () => {
 
 copyLinkBtn.addEventListener('click', async () => {
   await navigator.clipboard.writeText(getDirectPairUrl());
-  showToast('Direct room link copied!');
+  showToast('Direct pairing link copied!');
 });
 
 // QR Modal Handler with direct pairing URL
@@ -278,7 +335,7 @@ qrModal.addEventListener('click', (e) => {
   }
 });
 
-// --- 6. Theme Toggle & Toast ---
+// --- 6. Theme Toggle & Toast Notifications ---
 const savedTheme = localStorage.getItem('airtext_theme') || 'dark';
 document.documentElement.setAttribute('data-theme', savedTheme);
 themeBtn.textContent = savedTheme === 'dark' ? '🌙' : '☀';
@@ -298,7 +355,7 @@ function showToast(text) {
 }
 
 window.addEventListener('beforeunload', () => {
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (pingTimer) clearInterval(pingTimer);
   if (peer) {
     try { peer.destroy(); } catch (e) {}
   }
