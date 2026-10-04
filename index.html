@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AirPad • Real-time Sync</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- WebRTC Signaling library for serverless P2P -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <div class="app-card">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <span class="logo-icon">⚡</span>
+        <div>
+          <h1 class="brand-title">AirPad</h1>
+          <p class="room-indicator">Room: <span id="roomLabel">#...</span></p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="connection-badge" id="statusBadge">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusText">Connecting...</span>
+        </div>
+        <button id="themeToggleBtn" class="icon-btn" title="Toggle Theme" aria-label="Toggle theme">
+          <span id="themeIcon">🌙</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="editor-section">
+      <div class="editor-wrapper" id="dropZone">
+        <textarea 
+          id="editor" 
+          placeholder="Start typing your prompt here... It will sync instantly to your other device."
+          spellcheck="false"
+        ></textarea>
+        <div class="char-counter" id="charCount">0 characters</div>
+      </div>
+
+      <!-- Action Toolbar -->
+      <div class="action-bar">
+        <button id="copyBtn" class="btn btn-primary">
+          <span class="btn-icon">📋</span>
+          <span id="copyBtnText">Copy Prompt</span>
+        </button>
+        <button id="uploadBtn" class="btn btn-secondary">
+          <span class="btn-icon">📎</span>
+          <span>Send File</span>
+        </button>
+        <button id="clearBtn" class="btn btn-ghost">
+          <span>Clear</span>
+        </button>
+        <input type="file" id="fileInput" hidden />
+      </div>
+    </main>
+
+    <!-- Received Files Feed -->
+    <section class="files-section" id="filesSection" style="display: none;">
+      <h2 class="section-title">Received Files</h2>
+      <div class="file-list" id="fileList"></div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

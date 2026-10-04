@@ -1,0 +1,327 @@
+/* Color Tokens & Reset */
+:root {
+  --bg-app: #0b0f19;
+  --bg-card: #111827;
+  --bg-editor: #1f2937;
+  --bg-input: #111827;
+  --text-main: #f9fafb;
+  --text-muted: #9ca3af;
+  --border-color: #374151;
+  --border-focus: #6366f1;
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-text: #ffffff;
+  --secondary-bg: #374151;
+  --secondary-hover: #4b5563;
+  --secondary-text: #f9fafb;
+  --card-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+  --status-connected: #10b981;
+  --status-waiting: #f59e0b;
+  --status-disconnected: #ef4444;
+}
+
+[data-theme="light"] {
+  --bg-app: #f3f4f6;
+  --bg-card: #ffffff;
+  --bg-editor: #f9fafb;
+  --bg-input: #ffffff;
+  --text-main: #111827;
+  --text-muted: #6b7280;
+  --border-color: #e5e7eb;
+  --border-focus: #4f46e5;
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-text: #ffffff;
+  --secondary-bg: #f3f4f6;
+  --secondary-hover: #e5e7eb;
+  --secondary-text: #1f2937;
+  --card-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 1.25rem;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+.app-card {
+  width: 100%;
+  max-width: 680px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  box-shadow: var(--card-shadow);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* Header */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.logo-icon {
+  font-size: 1.6rem;
+  background: var(--bg-editor);
+  border: 1px solid var(--border-color);
+  padding: 0.4rem;
+  border-radius: 10px;
+}
+
+.brand-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.room-indicator {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.connection-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--bg-editor);
+  border: 1px solid var(--border-color);
+  padding: 0.35rem 0.7rem;
+  border-radius: 20px;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--status-waiting);
+  transition: background-color 0.2s ease;
+}
+
+.status-dot.connected {
+  background-color: var(--status-connected);
+}
+
+.status-dot.disconnected {
+  background-color: var(--status-disconnected);
+}
+
+.icon-btn {
+  background: var(--bg-editor);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 0.45rem;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  transition: background-color 0.2s;
+}
+
+.icon-btn:hover {
+  background-color: var(--secondary-hover);
+}
+
+/* Editor */
+.editor-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.editor-wrapper {
+  position: relative;
+  border-radius: 12px;
+}
+
+textarea {
+  width: 100%;
+  height: 250px;
+  background-color: var(--bg-editor);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  padding: 1rem;
+  padding-bottom: 2rem;
+  border-radius: 12px;
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.2s, background-color 0.25s;
+}
+
+textarea:focus {
+  border-color: var(--border-focus);
+}
+
+.char-counter {
+  position: absolute;
+  bottom: 10px;
+  right: 14px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* Actions */
+.action-bar {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  padding: 0.65rem 1.15rem;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-primary {
+  background-color: var(--primary);
+  color: var(--primary-text);
+  flex: 2;
+}
+
+.btn-primary:hover {
+  background-color: var(--primary-hover);
+}
+
+.btn-secondary {
+  background-color: var(--secondary-bg);
+  color: var(--secondary-text);
+  border: 1px solid var(--border-color);
+  flex: 1.5;
+}
+
+.btn-secondary:hover {
+  background-color: var(--secondary-hover);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  flex: 0.7;
+}
+
+.btn-ghost:hover {
+  background-color: var(--secondary-hover);
+  color: var(--text-main);
+}
+
+/* File Sharing List */
+.files-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  border-top: 1px solid var(--border-color);
+  padding-top: 1rem;
+}
+
+.section-title {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.file-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: var(--bg-editor);
+  border: 1px solid var(--border-color);
+  padding: 0.65rem 1rem;
+  border-radius: 8px;
+}
+
+.file-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.file-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+.file-size {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.download-link {
+  background-color: var(--primary);
+  color: var(--primary-text);
+  text-decoration: none;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.4rem 0.85rem;
+  border-radius: 6px;
+  transition: opacity 0.2s;
+}
+
+.download-link:hover {
+  opacity: 0.9;
+}
+
+@media (max-width: 480px) {
+  .action-bar {
+    flex-direction: column;
+  }
+  .btn {
+    width: 100%;
+  }
+}
