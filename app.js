@@ -48,7 +48,6 @@ function getFullShareUrl() {
   return `${base}#${activeRoomCode}`;
 }
 
-// Local Storage Draft Cache
 const cacheKey = `airtext_cache_${activeRoomCode}`;
 editor.value = localStorage.getItem(cacheKey) || '';
 updateCharCount();
@@ -57,22 +56,40 @@ function updateCharCount() {
   chars.textContent = `${editor.value.length} characters`;
 }
 
-// Device identifier
 const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
 const myDeviceLabel = isMobile ? 'Mobile Phone' : 'Laptop / PC';
 
-// --- 2. Multi-User WebRTC Relay Engine ---
+// --- 2. Production WebRTC Configuration with Free TURN Relays ---
 let peer = null;
-let connections = new Map(); // Stores all active peer channels
+let connections = new Map();
 let isRemoteInput = false;
 let isHost = false;
+let pingInterval = null;
 
+// Crucial: TURN servers bypass cellular carrier CGNAT and firewall barriers
 const peerConfig = {
+  debug: 2, // Logs ICE candidates directly to browser console
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' }
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      // Free public TURN relays from OpenRelay / Metered
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelay',
+        credential: 'openrelay'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelay',
+        credential: 'openrelay'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelay',
+        credential: 'openrelay'
+      }
     ]
   }
 };
@@ -85,65 +102,87 @@ function connectToRoom(roomCode) {
   updateStatus(false, 'Connecting...');
   networkText.textContent = 'Connecting to signaling network...';
 
-  const hostPeerId = `airtext-room-${roomCode}-host`;
-  const guestPeerId = `airtext-room-${roomCode}-guest-${Math.random().toString(36).substring(2, 7)}`;
+  const hostPeerId = `airtext-${roomCode}-host`;
+  const guestPeerId = `airtext-${roomCode}-guest-${Math.random().toString(36).substring(2, 7)}`;
 
-  // 1. Attempt to register as Host
+  // Step 1: Attempt Host Role
   peer = new Peer(hostPeerId, peerConfig);
 
-  peer.on('open', () => {
+  peer.on('open', (id) => {
     isHost = true;
-    updateStatus(false, 'Room ready • Waiting for peers...');
-    networkText.textContent = 'Room coordinator ready. Share QR or link!';
+    updateStatus(false, 'Ready (Host)');
+    networkText.textContent = 'Room coordinator ready. Scan QR with 2nd device!';
     updatePeerCount();
   });
 
   peer.on('error', (err) => {
-    // If Host slot is taken, join as a new guest and link to the Host
+    // If Host slot is busy, register as Guest and initiate connection to Host
     if (err.type === 'unavailable-id') {
       isHost = false;
       peer.destroy();
       peer = new Peer(guestPeerId, peerConfig);
 
       peer.on('open', () => {
-        updateStatus(false, 'Joining room...');
-        networkText.textContent = 'Connecting to room host...';
-        const conn = peer.connect(hostPeerId, { reliable: true });
-        setupConnectionEvents(conn);
+        updateStatus(false, 'Pairing (Guest)...');
+        networkText.textContent = 'Connecting to Room Host...';
+        initiateGuestConnection(hostPeerId);
       });
 
       peer.on('error', (clientErr) => {
-        console.error('Client peer error:', clientErr);
-        updateStatus(false, 'Connection error');
+        console.error('Guest Peer error:', clientErr);
+        networkText.textContent = 'Signaling error. Click Reset Room.';
       });
     } else {
       console.warn('Peer error:', err);
+      networkText.textContent = `Peer notice: ${err.type || 'network issue'}`;
     }
   });
 
-  // When new devices join the Host
+  // Host listener for incoming guest connections
   peer.on('connection', (conn) => {
     setupConnectionEvents(conn);
   });
 }
 
+function initiateGuestConnection(hostPeerId) {
+  const conn = peer.connect(hostPeerId, {
+    reliable: true
+  });
+  setupConnectionEvents(conn);
+}
+
 function setupConnectionEvents(conn) {
+  networkText.textContent = 'Handshaking ICE candidates...';
+
   conn.on('open', () => {
     connections.set(conn.peer, conn);
     updatePeerCount();
     conn.send({ type: 'HANDSHAKE', device: myDeviceLabel });
 
-    // Sync current editor state to the newcomer
+    // Send latest text draft
     if (editor.value) {
       conn.send({ type: 'SYNC_TEXT', text: editor.value });
+    }
+
+    // Start keep-alive ping to prevent mobile network drop
+    if (!pingInterval) {
+      pingInterval = setInterval(() => {
+        connections.forEach((c) => {
+          if (c.open) c.send({ type: 'PING' });
+        });
+      }, 3500);
     }
   });
 
   conn.on('data', (data) => {
     if (!data) return;
 
+    if (data.type === 'PING') {
+      return; // Keep-alive acknowledge
+    }
+
     if (data.type === 'HANDSHAKE') {
-      showToast(`Joined: ${data.device}`);
+      showToast(`Linked with ${data.device}`);
     } else if (data.type === 'SYNC_TEXT') {
       isRemoteInput = true;
       editor.value = data.text;
@@ -152,7 +191,7 @@ function setupConnectionEvents(conn) {
       triggerArrivalAnimation();
       isRemoteInput = false;
 
-      // Broadcast relay: If this machine is the Host, forward changes to all other peers
+      // Host relays to all other connected peers
       if (isHost) {
         connections.forEach((peerConn, peerId) => {
           if (peerId !== conn.peer && peerConn.open) {
@@ -168,7 +207,8 @@ function setupConnectionEvents(conn) {
     updatePeerCount();
   });
 
-  conn.on('error', () => {
+  conn.on('error', (err) => {
+    console.warn('Channel error:', err);
     connections.delete(conn.peer);
     updatePeerCount();
   });
@@ -177,13 +217,13 @@ function setupConnectionEvents(conn) {
 function updatePeerCount() {
   const count = connections.size;
   peerLabel.textContent = `${count} device${count === 1 ? '' : 's'} connected`;
-  
+
   if (count > 0) {
     updateStatus(true, 'Direct P2P Synced');
     networkText.textContent = `Direct P2P Active (${count} connected)`;
   } else {
     updateStatus(false, isHost ? 'Waiting for peers...' : 'Disconnected');
-    networkText.textContent = isHost ? 'Room open. Waiting for peers...' : 'Reconnecting...';
+    networkText.textContent = isHost ? 'Room active. Waiting for 2nd device to join...' : 'Searching for host...';
   }
 }
 
@@ -197,8 +237,9 @@ function triggerArrivalAnimation() {
   setTimeout(() => flash.classList.remove('show'), 1000);
 }
 
-// Clean up socket on window unload
+// Ensure clean disconnect on tab unload
 window.addEventListener('beforeunload', () => {
+  if (pingInterval) clearInterval(pingInterval);
   if (peer) {
     try { peer.destroy(); } catch (e) {}
   }
@@ -218,13 +259,14 @@ editor.addEventListener('input', () => {
     connections.forEach((conn) => {
       if (conn.open) conn.send(payload);
     });
-  }, 90);
+  }, 80);
 });
 
 // --- 4. Room Navigation & Action Buttons ---
 resetRoomBtn.addEventListener('click', () => {
   if (confirm('Start a new room? This will disconnect all peers.')) {
     localStorage.removeItem(cacheKey);
+    if (pingInterval) clearInterval(pingInterval);
     if (peer) {
       try { peer.destroy(); } catch (e) {}
     }
