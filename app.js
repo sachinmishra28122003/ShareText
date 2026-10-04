@@ -207,22 +207,20 @@ document.getElementById('copyLinkBtn').addEventListener('click', async () => {
   notify('Room link copied!');
 });
 
-// QR Modal Handler (With fallback & guaranteed open)
-const qrModal = document.getElementById('qrModal');
-const qrCanvas = document.getElementById('qrCanvas');
-
-// QR Modal Handler
+// --- 6. QR Modal Handler ---
 const qrModal = document.getElementById('qrModal');
 const qrContainer = document.getElementById('qrCanvas');
 
 document.getElementById('qrBtn').addEventListener('click', () => {
-  // 1. Clear any previous QR code so they don't stack
+  // Clear any existing QR render
   qrContainer.innerHTML = '';
 
-  // 2. Instantiate with the correct QRCode.js constructor
+  const shareUrl = window.location.href;
+
+  // Use QRCode.js constructor if loaded, otherwise fallback to SVG image
   if (typeof QRCode !== 'undefined') {
     new QRCode(qrContainer, {
-      text: window.location.href,
+      text: shareUrl,
       width: 180,
       height: 180,
       colorDark: '#0a0b0e',
@@ -230,16 +228,14 @@ document.getElementById('qrBtn').addEventListener('click', () => {
       correctLevel: QRCode.CorrectLevel.M
     });
   } else {
-    // Fallback image in case the script CDN is ever blocked
     const fallbackImg = document.createElement('img');
-    fallbackImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(window.location.href)}`;
+    fallbackImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(shareUrl)}`;
     fallbackImg.alt = 'QR Code';
     fallbackImg.style.width = '180px';
     fallbackImg.style.height = '180px';
     qrContainer.appendChild(fallbackImg);
   }
 
-  // 3. Open the modal
   qrModal.classList.add('open');
 });
 
@@ -247,24 +243,13 @@ document.getElementById('closeModalBtn').addEventListener('click', () => {
   qrModal.classList.remove('open');
 });
 
-// Close modal when tapping outside the modal card
-qrModal.addEventListener('click', (e) => {
-  if (e.target === qrModal) {
-    qrModal.classList.remove('open');
-  }
-});
-document.getElementById('closeModalBtn').addEventListener('click', () => {
-  qrModal.classList.remove('open');
-});
-
-// Close modal when tapping outside the card
 qrModal.addEventListener('click', (e) => {
   if (e.target === qrModal) {
     qrModal.classList.remove('open');
   }
 });
 
-// Theme Switcher
+// --- 7. Theme Switcher & Toast ---
 const themeBtn = document.getElementById('themeBtn');
 themeBtn.addEventListener('click', () => {
   const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
@@ -279,5 +264,5 @@ function notify(msg) {
   setTimeout(() => t.classList.remove('show'), 2000);
 }
 
-// Initialize Mesh
+// Start Mesh Network
 startPeerMesh();
