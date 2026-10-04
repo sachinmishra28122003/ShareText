@@ -211,21 +211,48 @@ document.getElementById('copyLinkBtn').addEventListener('click', async () => {
 const qrModal = document.getElementById('qrModal');
 const qrCanvas = document.getElementById('qrCanvas');
 
-document.getElementById('qrBtn').addEventListener('click', () => {
-  // Always open modal first so user gets instant visual feedback
-  qrModal.classList.add('open');
+// QR Modal Handler
+const qrModal = document.getElementById('qrModal');
+const qrContainer = document.getElementById('qrCanvas');
 
-  // Render QR via QRCode library
-  if (window.QRCode && typeof QRCode.toCanvas === 'function') {
-    QRCode.toCanvas(qrCanvas, window.location.href, { width: 190 }, (err) => {
-      if (err) console.error('QR rendering error:', err);
+document.getElementById('qrBtn').addEventListener('click', () => {
+  // 1. Clear any previous QR code so they don't stack
+  qrContainer.innerHTML = '';
+
+  // 2. Instantiate with the correct QRCode.js constructor
+  if (typeof QRCode !== 'undefined') {
+    new QRCode(qrContainer, {
+      text: window.location.href,
+      width: 180,
+      height: 180,
+      colorDark: '#0a0b0e',
+      colorLight: '#ffffff',
+      correctLevel: QRCode.CorrectLevel.M
     });
   } else {
-    // Fallback if cdnjs QRCode is loaded instead of node-qrcode
-    console.warn('QRCode.toCanvas not found; rendering alternative QR canvas...');
+    // Fallback image in case the script CDN is ever blocked
+    const fallbackImg = document.createElement('img');
+    fallbackImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(window.location.href)}`;
+    fallbackImg.alt = 'QR Code';
+    fallbackImg.style.width = '180px';
+    fallbackImg.style.height = '180px';
+    qrContainer.appendChild(fallbackImg);
   }
+
+  // 3. Open the modal
+  qrModal.classList.add('open');
 });
 
+document.getElementById('closeModalBtn').addEventListener('click', () => {
+  qrModal.classList.remove('open');
+});
+
+// Close modal when tapping outside the modal card
+qrModal.addEventListener('click', (e) => {
+  if (e.target === qrModal) {
+    qrModal.classList.remove('open');
+  }
+});
 document.getElementById('closeModalBtn').addEventListener('click', () => {
   qrModal.classList.remove('open');
 });
