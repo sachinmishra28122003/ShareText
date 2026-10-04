@@ -5,11 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AirText — Instant P2P Sync</title>
   
-  <link rel="stylesheet" href="./style.css?v=1.0.1" />
-  <!-- PeerJS for WebRTC DataChannel Mesh -->
+  <!-- Cache-busted Stylesheet -->
+  <link rel="stylesheet" href="./style.css?v=1.0.2" />
+  
+  <!-- PeerJS for WebRTC Mesh -->
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
-  <!-- QRCode.js -->
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+  <!-- Fast, Reliable QR Code Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
 
@@ -21,20 +23,20 @@
         <span class="status-dot" id="statusDot"></span>
         <span id="statusLabel">Standby</span>
       </div>
-      <button class="nav-btn" id="qrBtn">📱 QR</button>
-      <button class="nav-btn" id="themeBtn">🌙</button>
+      <button class="nav-btn" id="qrBtn" title="Pair via QR">📱 QR</button>
+      <button class="nav-btn" id="themeBtn" title="Toggle Theme">🌙</button>
     </div>
   </nav>
 
   <!-- Main Container -->
-  <div class="workspace">
-    <div class="hero">
+  <main class="workspace">
+    <header class="hero">
       <h1>Share Text Instantly</h1>
       <p>Multi-device WebRTC sync. Type or paste below to mirror in real time.</p>
-    </div>
+    </header>
 
     <!-- Room Control Bar -->
-    <div class="room-bar">
+    <section class="room-bar">
       <div class="room-current">
         <span>Room:</span>
         <span class="room-code" id="roomCodeDisplay">...</span>
@@ -45,15 +47,15 @@
         <input type="text" id="joinInput" placeholder="Join room..." maxlength="20" />
         <button class="btn-accent" id="joinBtn">Set</button>
       </div>
-    </div>
+    </section>
 
     <!-- Notepad Card -->
-    <div class="editor-container">
+    <section class="editor-container">
       <div class="editor-top">
         <span id="networkText">Connecting to room...</span>
         <span class="flash-pulse" id="flash">Synced</span>
       </div>
-      <textarea id="editor" placeholder="Type prompt or code here..."></textarea>
+      <textarea id="editor" placeholder="Type prompt or code here..." spellcheck="false"></textarea>
       <div class="editor-bottom">
         <div class="meta">
           <span id="chars">0 characters</span>
@@ -65,21 +67,22 @@
           <button class="btn-sm primary" id="copyBtn">Copy Prompt</button>
         </div>
       </div>
-    </div>
-  </div>
+    </section>
+  </main>
 
   <!-- QR Modal -->
-  <div class="modal-wrap" id="qrModal">
+  <div class="modal-wrap" id="qrModal" role="dialog" aria-modal="true">
     <div class="modal-card">
       <h3>Scan to Join Room</h3>
-      <p class="modal-sub">Share this QR code with any device</p>
-      <canvas id="qrCanvas"></canvas>
+      <p class="modal-sub">Share this QR code with your mobile or second device</p>
+      <div id="qrCanvas" style="display: flex; justify-content: center; margin: 1rem 0;"></div>
       <button class="btn-sm" id="closeModalBtn" style="width: 100%;">Close</button>
     </div>
   </div>
 
   <div class="toast" id="toast"></div>
 
-  <script src="./app.js"></script>
+  <!-- Cache-busted Script -->
+  <script src="./app.js?v=1.0.2"></script>
 </body>
 </html>
