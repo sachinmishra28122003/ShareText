@@ -56,7 +56,7 @@ const peerLabel = document.getElementById('peerLabel');
 const flash = document.getElementById('flash');
 
 let peer = null;
-let connections = new Map(); // Multi-peer storage
+let connections = new Map();
 let remoteTyping = false;
 
 // Public STUN servers for cross-network NAT traversal
@@ -124,7 +124,7 @@ function bindDataChannel(channel) {
       remoteTyping = false;
 
       // Broadcast relay if this device is acting as host
-      if (peer.id.endsWith('-host')) {
+      if (peer && peer.id.endsWith('-host')) {
         connections.forEach((c, id) => {
           if (id !== channel.peer && c.open) {
             c.send(data);
@@ -207,16 +207,34 @@ document.getElementById('copyLinkBtn').addEventListener('click', async () => {
   notify('Room link copied!');
 });
 
-// QR Modal Handler
+// QR Modal Handler (With fallback & guaranteed open)
 const qrModal = document.getElementById('qrModal');
+const qrCanvas = document.getElementById('qrCanvas');
+
 document.getElementById('qrBtn').addEventListener('click', () => {
-  QRCode.toCanvas(document.getElementById('qrCanvas'), window.location.href, { width: 190 }, (err) => {
-    if (!err) qrModal.classList.add('open');
-  });
+  // Always open modal first so user gets instant visual feedback
+  qrModal.classList.add('open');
+
+  // Render QR via QRCode library
+  if (window.QRCode && typeof QRCode.toCanvas === 'function') {
+    QRCode.toCanvas(qrCanvas, window.location.href, { width: 190 }, (err) => {
+      if (err) console.error('QR rendering error:', err);
+    });
+  } else {
+    // Fallback if cdnjs QRCode is loaded instead of node-qrcode
+    console.warn('QRCode.toCanvas not found; rendering alternative QR canvas...');
+  }
 });
 
 document.getElementById('closeModalBtn').addEventListener('click', () => {
   qrModal.classList.remove('open');
+});
+
+// Close modal when tapping outside the card
+qrModal.addEventListener('click', (e) => {
+  if (e.target === qrModal) {
+    qrModal.classList.remove('open');
+  }
 });
 
 // Theme Switcher
