@@ -164,7 +164,7 @@ function triggerPulse() {
   setTimeout(() => flash.classList.remove('show'), 900);
 }
 
-// Ensure socket deregistration on page exit
+// Clean up socket registration on page unload
 window.addEventListener('beforeunload', () => {
   if (peer) peer.destroy();
 });
@@ -217,15 +217,15 @@ document.getElementById('qrBtn').addEventListener('click', () => {
 
   const shareUrl = window.location.href;
 
-  // Use QRCode.js constructor if loaded, otherwise fallback to SVG image
-  if (typeof QRCode !== 'undefined') {
-    new QRCode(qrContainer, {
+  // Use QRCode constructor if available on window, otherwise fall back to dynamic image
+  if (typeof window.QRCode !== 'undefined') {
+    new window.QRCode(qrContainer, {
       text: shareUrl,
       width: 180,
       height: 180,
       colorDark: '#0a0b0e',
       colorLight: '#ffffff',
-      correctLevel: QRCode.CorrectLevel.M
+      correctLevel: window.QRCode.CorrectLevel.M
     });
   } else {
     const fallbackImg = document.createElement('img');
