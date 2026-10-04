@@ -325,3 +325,93 @@ textarea:focus {
     width: 100%;
   }
 }
+
+/* Visible Room Strip */
+.room-strip {
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto 1.25rem;
+  padding: 0 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.room-pill-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  padding: 0.45rem 0.9rem;
+  border-radius: 10px;
+}
+
+.room-pill-title {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.room-code-tag {
+  font-family: monospace;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.05em;
+}
+
+.btn-text-link {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0 4px;
+}
+
+.btn-text-link:hover {
+  color: var(--text-primary);
+}
+
+.join-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.join-box input {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  padding: 0.45rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-family: monospace;
+  outline: none;
+  width: 170px;
+}
+
+.join-box input:focus {
+  border-color: var(--border-focus);
+}
+
+.btn-join {
+  background: var(--bg-card-subtle);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  padding: 0.45rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-join:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
