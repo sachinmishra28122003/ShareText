@@ -16,6 +16,12 @@
   let iceCandidateQueue = [];
   let activeRoom = '';
   let cacheKey = '';
+  let brokerIndex = 0;
+
+  const brokers = [
+    { host: 'broker.emqx.io', port: 8084, path: '/mqtt' },
+    { host: 'broker.hivemq.com', port: 8884, path: '/mqtt' }
+  ];
 
   const myPeerId = 'peer_' + Math.random().toString(36).substring(2, 9);
   let topic = '';
@@ -258,16 +264,18 @@
       return;
     }
 
-    logDebug('Connecting to signaling broker...');
+    const currentBroker = brokers[brokerIndex % brokers.length];
+    logDebug(`Connecting to signaling (${currentBroker.host})...`);
 
-    try {
-      mqttClient = new pahoLib.Client('broker.emqx.io', 443, '/mqtt', myPeerId);
-    } catch (err) {
-      mqttClient = new pahoLib.Client('broker.emqx.io', 8084, '/mqtt', myPeerId);
-    }
+    mqttClient = new pahoLib.Client(
+      currentBroker.host,
+      currentBroker.port,
+      currentBroker.path,
+      myPeerId
+    );
 
     mqttClient.onConnectionLost = (resp) => {
-      if (resp.errorCode !== 0) {
+      if (resp && resp.errorCode !== 0) {
         logDebug('Signaling lost. Reconnecting...');
         updateStatus(false, 'Reconnecting');
         setTimeout(initSignaling, 2000);
@@ -285,7 +293,7 @@
 
     mqttClient.connect({
       useSSL: true,
-      timeout: 10,
+      timeout: 8,
       keepAliveInterval: 30,
       cleanSession: true,
       onSuccess: () => {
@@ -305,14 +313,15 @@
         sendSignal({ type: 'PING_PEER', from: myPeerId });
       },
       onFailure: (err) => {
-        console.error('MQTT error:', err);
-        logDebug('Signaling blocked by network. Retrying...');
-        setTimeout(initSignaling, 3000);
+        console.warn('Broker connect failed:', err);
+        brokerIndex++;
+        logDebug('Switching signaling broker...');
+        setTimeout(initSignaling, 1500);
       }
     });
   }
 
-  // --- App Initialization (Guaranteed DOM Ready) ---
+  // --- App Initialization (DOM Ready) ---
   function initApp() {
     editor = document.getElementById('editor');
     chars = document.getElementById('chars');
