@@ -63,11 +63,18 @@ const rtcConfig = {
 };
 
 // --- Step 1: Connect to Firewall-Proof MQTT Signaling Broker ---
+// --- Step 1: Connect to Firewall-Proof MQTT Signaling Broker ---
 function initSignaling() {
+  if (typeof Paho === 'undefined' || !Paho.MQTT) {
+    networkText.textContent = 'Loading signaling engine...';
+    setTimeout(initSignaling, 300);
+    return;
+  }
+
   networkText.textContent = 'Connecting to signaling network...';
-  
-  // Connect to public enterprise-friendly broker over secure TLS port 8884
-  mqttClient = new Paho.MQTT.Client('broker.hivemq.com', 8884, myPeerId);
+
+  // Port 443 with /mqtt path passes through standard enterprise web proxies
+  mqttClient = new Paho.MQTT.Client('broker.hivemq.com', 443, '/mqtt', myPeerId);
 
   mqttClient.onConnectionLost = (resp) => {
     if (resp.errorCode !== 0) {
@@ -77,26 +84,32 @@ function initSignaling() {
   };
 
   mqttClient.onMessageArrived = (msg) => {
-    handleSignalingMessage(JSON.parse(msg.payloadString));
+    try {
+      handleSignalingMessage(JSON.parse(msg.payloadString));
+    } catch (e) {
+      console.warn('Failed to parse signaling message:', e);
+    }
   };
 
   mqttClient.connect({
     useSSL: true,
-    timeout: 5,
+    timeout: 8,
+    keepAliveInterval: 30,
     onSuccess: () => {
-      // Subscribe to room signaling channel
       mqttClient.subscribe(`${topicBase}/signal`, { qos: 1 });
       networkText.textContent = 'Ready. Scan QR with 2nd device!';
       
-      // Announce arrival in the room
+      // Send discovery signal to any active device in room
       sendSignal({ type: 'DISCOVERY', from: myPeerId });
     },
     onFailure: (err) => {
-      console.warn('MQTT error:', err);
-      networkText.textContent = 'Signaling unavailable. Check network.';
+      console.warn('MQTT Connection Error:', err);
+      networkText.textContent = 'Signaling offline. Retrying...';
+      setTimeout(initSignaling, 3000);
     }
   });
 }
+
 
 function sendSignal(payload) {
   if (mqttClient && mqttClient.isConnected()) {
