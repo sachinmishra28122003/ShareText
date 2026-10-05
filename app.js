@@ -27,7 +27,9 @@ const filesDeck = document.getElementById('filesDeck');
 function generateSlug() {
   const c = 'abcdefghjkmnpqrstuvwxyz23456789';
   let s = '';
-  for (let i = 0; i < 6; i++) s += c[Math.floor(Math.random() * c.length)];
+  for (let i = 0; i < 6; i++) {
+    s += c[Math.floor(Math.random() * c.length)];
+  }
   return s;
 }
 
@@ -50,13 +52,12 @@ function updateCharCount() {
   chars.textContent = `${editor.value.length} characters`;
 }
 
-// Log status on screen so you know the exact failure step
 function logDebug(msg) {
   console.log('[AirText]', msg);
   networkText.textContent = msg;
 }
 
-// --- 2. Signaling State ---
+// --- 2. Signaling State & WebRTC Config ---
 let rtcPeer = null;
 let dataChannel = null;
 let mqttClient = null;
@@ -64,14 +65,13 @@ let isRemoteInput = false;
 let handshakeInterval = null;
 let iceCandidateQueue = [];
 
-// Unique random peer ID for tie-breaking
 const myPeerId = 'peer_' + Math.random().toString(36).substring(2, 9);
 const topic = `airtext_pub/v2/${activeRoom}`;
 
-// Fallback ICE Servers with port 443 TURN
 const rtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
     {
       urls: 'turns:openrelay.metered.ca:443?transport=tcp',
@@ -86,9 +86,17 @@ const rtcConfig = {
   ]
 };
 
-// --- 3. Ultra-Reliable WSS Signaling (EMQX Enterprise Broker) ---
+// --- 3. Reliable Paho Accessor & MQTT Client ---
+function getPaho() {
+  if (typeof window.Paho !== 'undefined' && window.Paho.MQTT) return window.Paho.MQTT;
+  if (typeof Paho !== 'undefined' && Paho.MQTT) return Paho.MQTT;
+  if (typeof Paho !== 'undefined' && Paho.Client) return Paho;
+  return null;
+}
+
 function initSignaling() {
-  if (typeof Paho === 'undefined' || !Paho.MQTT) {
+  const pahoLib = getPaho();
+  if (!pahoLib) {
     logDebug('Waiting for Paho library...');
     setTimeout(initSignaling, 300);
     return;
@@ -96,8 +104,12 @@ function initSignaling() {
 
   logDebug('Connecting to signaling broker...');
 
-  // broker.emqx.io on port 8084 (Secure WSS with /mqtt path)
-  mqttClient = new Paho.MQTT.Client('broker.emqx.io', 8084, '/mqtt', myPeerId);
+  try {
+    mqttClient = new pahoLib.Client('broker.emqx.io', 443, '/mqtt', myPeerId);
+  } catch (err) {
+    console.warn('Port 443 unavailable, switching to 8084:', err);
+    mqttClient = new pahoLib.Client('broker.emqx.io', 8084, '/mqtt', myPeerId);
+  }
 
   mqttClient.onConnectionLost = (resp) => {
     if (resp.errorCode !== 0) {
@@ -126,7 +138,6 @@ function initSignaling() {
       logDebug('Signaling ready. Scan QR with 2nd device!');
       updateStatus(false, 'Ready');
 
-      // Continuous handshake ping every 1.5s until WebRTC data channel opens
       clearInterval(handshakeInterval);
       handshakeInterval = setInterval(() => {
         if (!dataChannel || dataChannel.readyState !== 'open') {
@@ -140,15 +151,16 @@ function initSignaling() {
     },
     onFailure: (err) => {
       console.error('MQTT error:', err);
-      logDebug('Signaling blocked by network. Check Wi-Fi.');
+      logDebug('Signaling blocked by network. Retrying...');
       setTimeout(initSignaling, 3000);
     }
   });
 }
 
 function sendSignal(payload) {
-  if (mqttClient && mqttClient.isConnected()) {
-    const msg = new Paho.MQTT.Message(JSON.stringify(payload));
+  const pahoLib = getPaho();
+  if (mqttClient && mqttClient.isConnected() && pahoLib) {
+    const msg = new pahoLib.Message(JSON.stringify(payload));
     msg.destinationName = topic;
     msg.qos = 1;
     mqttClient.send(msg);
@@ -196,16 +208,14 @@ function getOrCreatePeerConnection(isInitiator) {
 }
 
 function handleSignalingMessage(data) {
-  if (data.from === myPeerId) return; // Skip own messages
+  if (data.from === myPeerId) return;
 
   if (data.type === 'PING_PEER') {
-    // Both peers found each other! Tie-breaker decides who initiates
     logDebug('Peer detected! Negotiating...');
     if (myPeerId < data.from && (!rtcPeer || rtcPeer.connectionState === 'disconnected')) {
       getOrCreatePeerConnection(true);
     }
-  } 
-  else if (data.type === 'OFFER') {
+  } else if (data.type === 'OFFER') {
     logDebug('Received offer. Creating answer...');
     const peer = getOrCreatePeerConnection(false);
 
@@ -219,8 +229,7 @@ function handleSignalingMessage(data) {
     }).then(() => {
       sendSignal({ type: 'ANSWER', sdp: peer.localDescription, from: myPeerId });
     }).catch((e) => console.error('Answer error:', e));
-  } 
-  else if (data.type === 'ANSWER') {
+  } else if (data.type === 'ANSWER') {
     logDebug('Received answer. Finalizing link...');
     if (rtcPeer) {
       rtcPeer.setRemoteDescription(new RTCSessionDescription(data.sdp)).then(() => {
@@ -229,8 +238,7 @@ function handleSignalingMessage(data) {
         }
       }).catch((e) => console.error('Remote desc error:', e));
     }
-  } 
-  else if (data.type === 'ICE_CANDIDATE') {
+  } else if (data.type === 'ICE_CANDIDATE') {
     const cand = new RTCIceCandidate(data.candidate);
     if (rtcPeer && rtcPeer.remoteDescription) {
       rtcPeer.addIceCandidate(cand).catch((e) => console.warn('ICE add error:', e));
@@ -249,9 +257,10 @@ function bindDataChannel(channel) {
     peerLabel.textContent = '1 device connected';
     showToast('Device connected!');
 
-    // WebRTC is self-sufficient; disconnect MQTT to free resources
     if (mqttClient && mqttClient.isConnected()) {
-      try { mqttClient.disconnect(); } catch (e) {}
+      try {
+        mqttClient.disconnect();
+      } catch (e) {}
     }
 
     if (editor.value) {
@@ -438,7 +447,3 @@ function showToast(text) {
 
 // Start
 initSignaling();
-
-                  
-
-  
