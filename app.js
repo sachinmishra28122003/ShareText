@@ -1,26 +1,22 @@
-// --- AirText: Rate-Limit Protected Native WebRTC Signaling ---
+// --- AirText: Clean, Zero-Polling Native WebRTC Link ---
 (function () {
   'use strict';
 
-  // UI Elements
+  // Elements
   let editor, chars, roomCodeDisplay, networkText, flash, statusDot, statusLabel;
   let peerLabel, clearBtn, copyBtn, copyLinkBtn, resetRoomBtn, joinInput, joinBtn;
   let qrBtn, qrModal, closeModalBtn, qrCanvas, themeBtn, toast, sendFileBtn, fileInput, filesDeck;
 
-  // WebRTC & State
+  // WebRTC & Connection State
   let rtcPeer = null;
   let dataChannel = null;
+  let sigSocket = null;
   let isRemoteInput = false;
-  let signalingTimer = null;
-  let isPolling = false;
-  let lastSeenTimestamp = 0;
+  let handshakeTimer = null;
   let iceCandidateQueue = [];
-  let pollInterval = 2500;
-  let handshakeCounter = 0;
 
   const myPeerId = 'peer_' + Math.random().toString(36).substring(2, 9);
   let activeRoom = '';
-  let topic = '';
   let cacheKey = '';
 
   const rtcConfig = {
@@ -91,84 +87,70 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Rate-Limit Resilient Signaling ---
-  async function sendSignal(payload) {
-    try {
-      await fetch(`https://ntfy.sh/${topic}`, {
-        method: 'POST',
-        headers: { 'Title': 'AirText' },
-        body: JSON.stringify(payload)
-      });
-    } catch (err) {
-      console.warn('Signaling send error:', err);
+  // --- 1. Port 443 Native WebSocket Signaling (Zero HTTP Polling) ---
+  function sendSignal(payload) {
+    if (sigSocket && sigSocket.readyState === WebSocket.OPEN) {
+      sigSocket.send(JSON.stringify({ room: activeRoom, ...payload }));
     }
   }
 
-  async function pollSignaling() {
+  function initSignaling() {
     if (dataChannel && dataChannel.readyState === 'open') return;
-    if (isPolling) return;
-    isPolling = true;
+
+    logStatus('Connecting to signaling relay...');
+    updateStatus(false, 'Connecting');
+
+    // Public demo WSS relay running on Standard Port 443 (TLS)
+    const relayUrl = `wss://free.blr2.piesocket.com/v3/${activeRoom}?api_key=VC3OtKXqqNz5MgpHucnhAxnuAvM8frq2&notify_self=0`;
 
     try {
-      // Periodic Handshake ping synchronized with poll to eliminate concurrent timers
-      handshakeCounter++;
-      if (handshakeCounter % 2 === 0) {
-        sendSignal({ type: 'PING_PEER', from: myPeerId });
-      }
+      sigSocket = new WebSocket(relayUrl);
+    } catch (e) {
+      logStatus('WSS blocked. Retrying...');
+      setTimeout(initSignaling, 3000);
+      return;
+    }
 
-      const sinceParam = lastSeenTimestamp > 0 ? lastSeenTimestamp : '30s';
-      const res = await fetch(`https://ntfy.sh/${topic}/json?poll=1&since=${sinceParam}`);
+    sigSocket.onopen = () => {
+      logStatus('Signaling ready. Scan QR with 2nd device!');
+      updateStatus(false, 'Ready');
 
-      if (res.status === 429) {
-        // Corporate proxy throttle detected: throttle back to 6s
-        pollInterval = 6000;
-        logStatus('Proxy throttle detected. Backing off...');
-      } else if (res.ok) {
-        pollInterval = 2500;
-        const text = await res.text();
-        const lines = text.trim().split('\n');
-
-        for (const line of lines) {
-          if (!line) continue;
-          try {
-            const entry = JSON.parse(line);
-            if (entry.time && entry.time > lastSeenTimestamp) {
-              lastSeenTimestamp = entry.time;
-            }
-            if (entry.event === 'message' && entry.message) {
-              const signal = JSON.parse(entry.message);
-              handleSignalingMessage(signal);
-            }
-          } catch (e) {}
+      clearInterval(handshakeTimer);
+      handshakeTimer = setInterval(() => {
+        if (!dataChannel || dataChannel.readyState !== 'open') {
+          sendSignal({ type: 'PING_PEER', from: myPeerId });
+        } else {
+          clearInterval(handshakeTimer);
         }
+      }, 2000);
+
+      sendSignal({ type: 'PING_PEER', from: myPeerId });
+    };
+
+    sigSocket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleSignalingMessage(data);
+      } catch (e) {}
+    };
+
+    sigSocket.onerror = () => {
+      console.warn('Signaling socket error');
+    };
+
+    sigSocket.onclose = () => {
+      if (!dataChannel || dataChannel.readyState !== 'open') {
+        logStatus('Signaling reconnecting...');
+        setTimeout(initSignaling, 3000);
       }
-    } catch (err) {
-      console.warn('Signaling poll error:', err);
-    } finally {
-      isPolling = false;
-    }
-
-    if (!dataChannel || dataChannel.readyState !== 'open') {
-      signalingTimer = setTimeout(pollSignaling, pollInterval);
-    }
+    };
   }
 
-  function startSignaling() {
-    logStatus('Signaling ready. Scan QR with 2nd device!');
-    updateStatus(false, 'Ready');
-
-    // Initial broadcast
-    sendSignal({ type: 'PING_PEER', from: myPeerId });
-
-    // Single polling pipeline
-    signalingTimer = setTimeout(pollSignaling, 1000);
-  }
-
-  // --- 2. Standard WebRTC Connection ---
+  // --- 2. WebRTC Peer Connection ---
   function getOrCreatePeerConnection(isInitiator) {
     if (rtcPeer) return rtcPeer;
 
-    logStatus(isInitiator ? 'Initiating P2P offer...' : 'Waiting for P2P offer...');
+    logStatus(isInitiator ? 'Initiating P2P link...' : 'Answering P2P link...');
     rtcPeer = new RTCPeerConnection(rtcConfig);
 
     rtcPeer.onicecandidate = (e) => {
@@ -201,12 +183,12 @@
     if (!data || data.from === myPeerId) return;
 
     if (data.type === 'PING_PEER') {
-      logStatus('Peer detected! Negotiating link...');
+      logStatus('Peer detected! Linking...');
       if (myPeerId < data.from && (!rtcPeer || rtcPeer.connectionState === 'disconnected')) {
         getOrCreatePeerConnection(true);
       }
     } else if (data.type === 'OFFER') {
-      logStatus('Received offer. Answering...');
+      logStatus('Received offer. Responding...');
       const peer = getOrCreatePeerConnection(false);
 
       peer.setRemoteDescription(new RTCSessionDescription(data.sdp)).then(() => {
@@ -241,7 +223,11 @@
   // --- 3. DataChannel Setup ---
   function bindDataChannel(channel) {
     channel.onopen = () => {
-      clearTimeout(signalingTimer);
+      clearInterval(handshakeTimer);
+      if (sigSocket) {
+        sigSocket.close();
+        sigSocket = null;
+      }
 
       updateStatus(true, 'Direct P2P Synced');
       logStatus('Direct P2P Synced (Firewall Bypassed)');
@@ -268,7 +254,7 @@
           showToast(`Received ${data.name}`);
         }
       } catch (err) {
-        console.warn('Channel parse error:', err);
+        console.warn('Channel error:', err);
       }
     };
 
@@ -279,7 +265,7 @@
     };
   }
 
-  // --- 4. DOM Initialization ---
+  // --- 4. Application Init ---
   function initApp() {
     editor = document.getElementById('editor');
     chars = document.getElementById('chars');
@@ -313,9 +299,6 @@
     if (roomCodeDisplay) {
       roomCodeDisplay.textContent = '#' + activeRoom;
     }
-
-    // High-entropy prefix prevents collision with other ntfy rooms on public gateways
-    topic = `airtext_rel_${activeRoom}_${Math.random().toString(36).substring(2, 6)}`;
     cacheKey = `airtext_draft_${activeRoom}`;
 
     if (editor) {
@@ -370,7 +353,7 @@
       resetRoomBtn.addEventListener('click', () => {
         if (confirm('Start a new room?')) {
           localStorage.removeItem(cacheKey);
-          clearTimeout(signalingTimer);
+          clearInterval(handshakeTimer);
           window.location.hash = generateSlug();
           window.location.reload();
         }
@@ -412,27 +395,19 @@
       });
     }
 
+    // Reliable Repeated QR Generation
     if (qrBtn && qrModal && qrCanvas) {
       qrBtn.addEventListener('click', () => {
-        qrCanvas.innerHTML = '';
-        const shareUrl = getFullShareUrl();
-        if (typeof window.QRCode !== 'undefined') {
-          new window.QRCode(qrCanvas, {
-            text: shareUrl,
-            width: 180,
-            height: 180,
-            colorDark: '#0a0b0e',
-            colorLight: '#ffffff',
-            correctLevel: window.QRCode.CorrectLevel.M
-          });
-        } else {
-          // Zero-dependency fallback rendering
-          const qrImg = document.createElement('img');
-          qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(shareUrl)}`;
-          qrImg.alt = 'Pair QR';
-          qrImg.style.borderRadius = '8px';
-          qrCanvas.appendChild(qrImg);
+        while (qrCanvas.firstChild) {
+          qrCanvas.removeChild(qrCanvas.firstChild);
         }
+        const shareUrl = getFullShareUrl();
+        const qrImg = document.createElement('img');
+        qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(shareUrl)}`;
+        qrImg.alt = 'Scan to Join';
+        qrImg.style.width = '180px';
+        qrImg.style.height = '180px';
+        qrCanvas.appendChild(qrImg);
         qrModal.classList.add('open');
       });
     }
@@ -458,7 +433,7 @@
       });
     }
 
-    startSignaling();
+    initSignaling();
   }
 
   if (document.readyState === 'loading') {
