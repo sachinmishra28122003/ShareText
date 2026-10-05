@@ -12,6 +12,7 @@
   let dataChannel = null;
   let isRemoteInput = false;
   let pollTimer = null;
+  let guestAnnounceTimer = null;
   let isPolling = false;
   let lastHandledMessageId = null;
 
@@ -19,10 +20,11 @@
   let activeRoom = '';
   let cacheKey = '';
 
-  // ⚠️ REPLACE THIS WITH YOUR REALTIME DATABASE URL (No trailing slash)
-  const FIREBASE_BASE = 'https://airtext-relay-default-rtdb.firebaseio.com/';
+  // Sanitized Firebase URL (guarantees no trailing slash)
+  const RAW_FIREBASE_URL = 'https://airtext-relay-default-rtdb.firebaseio.com';
+  const FIREBASE_BASE = RAW_FIREBASE_URL.replace(/\/+$/, '');
 
-  // Free TURN relays over Port 443 TCP to punch through corporate symmetric firewalls
+  // Enterprise TURN servers over Port 443 TCP to punch through corporate symmetric firewalls
   const rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -156,7 +158,7 @@
         }
       }
     } catch (err) {
-      // Ignore temporary polling glitches
+      // Suppress temporary polling glitches
     } finally {
       isPolling = false;
     }
@@ -167,14 +169,17 @@
     }
   }
 
-  // Wipe the signaling room node from Firebase completely to save free storage
-  async function cleanupFirebaseRoom() {
+  // Guaranteed Room Purge: Clears cloud node on sync, tab close, or room reset
+  function cleanupFirebaseRoom() {
+    if (!activeRoom || !FIREBASE_BASE) return;
+    const cleanupUrl = `${FIREBASE_BASE}/rooms/${activeRoom}.json`;
+
     try {
-      await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}.json`, {
-        method: 'DELETE'
-      });
-      console.log('[AirText] Cleaned up signaling room from Firebase');
+      // Using keepalive allows the DELETE request to outlive tab closure
+      fetch(cleanupUrl, { method: 'DELETE', keepalive: true }).catch(() => {});
     } catch (e) {}
+
+    console.log(`[AirText] Room #${activeRoom} purge dispatched.`);
   }
 
   // --- 2. Deterministic WebRTC Setup ---
@@ -245,8 +250,9 @@
   function bindDataChannel(channel) {
     channel.onopen = () => {
       clearTimeout(pollTimer);
+      clearInterval(guestAnnounceTimer);
 
-      // Instant Cleanup: Handshake complete, delete cloud data
+      // Handshake succeeded: Immediately delete signaling data from Firebase
       cleanupFirebaseRoom();
 
       updateStatus(true, 'Direct P2P Synced');
@@ -292,7 +298,7 @@
     clearTimeout(pollTimer);
 
     if (isHost) {
-      // Pre-seed an empty node so GET never returns 404
+      // Seed room node with creation time so poll GET requests never return 404
       try {
         await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}.json`, {
           method: 'PUT',
@@ -300,6 +306,16 @@
         });
       } catch (e) {}
     } else {
+      // Guest retries handshake announcement every 2s until P2P channel connects
+      clearInterval(guestAnnounceTimer);
+      guestAnnounceTimer = setInterval(() => {
+        if (!dataChannel || dataChannel.readyState !== 'open') {
+          sendSignal({ type: 'GUEST_JOINED' });
+        } else {
+          clearInterval(guestAnnounceTimer);
+        }
+      }, 2000);
+
       sendSignal({ type: 'GUEST_JOINED' });
     }
 
@@ -360,7 +376,7 @@
         updateCharCount();
         localStorage.setItem(cacheKey, editor.value);
 
-        // Text synchronization is 100% P2P over WebRTC DataChannel (0 bytes used on Firebase)
+        // Keystrokes stream exclusively through P2P DataChannel (0 cloud bytes)
         if (isRemoteInput || !dataChannel || dataChannel.readyState !== 'open') return;
 
         clearTimeout(typingTimer);
@@ -391,7 +407,7 @@
             size: formatFileSize(file.size),
             data: reader.result
           };
-          // File synchronization is 100% P2P over WebRTC DataChannel (0 bytes used on Firebase)
+          // File transfers stream exclusively through P2P DataChannel (0 cloud bytes)
           dataChannel.send(JSON.stringify(payload));
           renderFileCard(file.name, payload.size, reader.result, true);
           showToast(`Sent ${file.name}`);
@@ -407,6 +423,7 @@
           cleanupFirebaseRoom();
           localStorage.removeItem(cacheKey);
           clearTimeout(pollTimer);
+          clearInterval(guestAnnounceTimer);
           window.location.hash = '';
           window.location.reload();
         }
@@ -486,6 +503,10 @@
         themeBtn.textContent = next === 'dark' ? '🌙' : '☀';
       });
     }
+
+    // Attach lifecycle exit purges
+    window.addEventListener('pagehide', cleanupFirebaseRoom);
+    window.addEventListener('beforeunload', cleanupFirebaseRoom);
 
     startSignaling();
   }
