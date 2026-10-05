@@ -1,4 +1,4 @@
-// --- AirText: Zero-Dependency Corporate-Safe WebRTC Sync ---
+// --- AirText: Zero-Dependency Corporate-Safe WebRTC Sync (Vanilla ICE Engine) ---
 (function () {
   'use strict';
 
@@ -13,18 +13,18 @@
   let isRemoteInput = false;
   let pollTimer = null;
   let isPolling = false;
-  let iceCandidateQueue = [];
-  const processedMessageIds = new Set();
+  let lastHandledMessageId = null;
 
   let isHost = true;
   let activeRoom = '';
+  let bucketId = '';
   let cacheKey = '';
   let sendBucketUrl = '';
   let listenBucketUrl = '';
 
-  // Public, open CORS key-value bucket over standard port 443
-  const KV_BUCKET = 'https://kvdb.io/4y2N6o1QfHqG3qUf1zHq4A';
+  const KV_BASE = 'https://kvdb.io';
 
+  // Enterprise TURN servers over Port 443 TCP to punch through corporate symmetric firewalls
   const rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -51,7 +51,7 @@
   }
 
   function getFullShareUrl() {
-    return `${window.location.origin}${window.location.pathname}#${activeRoom}?role=guest`;
+    return `${window.location.origin}${window.location.pathname}#${activeRoom}_${bucketId}?role=guest`;
   }
 
   function logStatus(msg) {
@@ -103,8 +103,29 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Clean Key-Value HTTPS Signaling ---
- // --- 1. Clean Key-Value HTTPS Signaling ---
+  // --- 1. Robust Vanilla ICE Candidate Collector ---
+  function waitForIceGathering(pc) {
+    return new Promise((resolve) => {
+      if (pc.iceGatheringState === 'complete') {
+        resolve();
+      } else {
+        const checkState = () => {
+          if (pc.iceGatheringState === 'complete') {
+            pc.removeEventListener('icegatheringstatechange', checkState);
+            resolve();
+          }
+        };
+        pc.addEventListener('icegatheringstatechange', checkState);
+        // Fallback cap at 1.2s so link negotiation never hangs
+        setTimeout(() => {
+          pc.removeEventListener('icegatheringstatechange', checkState);
+          resolve();
+        }, 1200);
+      }
+    });
+  }
+
+  // --- 2. Key-Value HTTPS Signaling ---
   async function sendSignal(payload) {
     const packet = {
       mid: Math.random().toString(36).substring(2, 9),
@@ -118,7 +139,7 @@
         body: JSON.stringify(packet)
       });
     } catch (e) {
-      console.warn('Signal send error:', e);
+      console.warn('Signaling push error:', e);
     }
   }
 
@@ -131,61 +152,33 @@
       const res = await fetch(`${listenBucketUrl}?t=${Date.now()}`);
       if (res.status === 200) {
         const text = await res.text();
-        if (text && text.trim().length > 2) {
+        if (text && text.trim().length > 5) {
           const msg = JSON.parse(text);
-          if (msg && msg.mid && !processedMessageIds.has(msg.mid)) {
-            processedMessageIds.add(msg.mid);
+          if (msg && msg.mid && msg.mid !== lastHandledMessageId) {
+            lastHandledMessageId = msg.mid;
             handleSignalingMessage(msg);
           }
         }
       }
-      // If 404, the guest has simply not joined yet; continue quietly
     } catch (err) {
-      // Suppress network jitter logs while waiting
+      // Suppress temporary network jitter while awaiting peer
     } finally {
       isPolling = false;
     }
 
     if (!dataChannel || dataChannel.readyState !== 'open') {
       clearTimeout(pollTimer);
-      pollTimer = setTimeout(pollSignaling, 2000);
+      pollTimer = setTimeout(pollSignaling, 1800);
     }
   }
 
-  async function startSignaling() {
-    logStatus(isHost ? 'Signaling ready. Scan QR with 2nd device!' : 'Connecting to Host...');
-    updateStatus(false, 'Ready');
-
-    clearTimeout(pollTimer);
-
-    // Host initializes both keys with empty JSON to prevent 404 logs
-    if (isHost) {
-      try {
-        await fetch(sendBucketUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' });
-        await fetch(listenBucketUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' });
-      } catch (e) {}
-    } else {
-      // Guest immediately signals arrival
-      sendSignal({ type: 'GUEST_JOINED' });
-    }
-
-    pollTimer = setTimeout(pollSignaling, 1000);
-  }
-
-  // --- 2. Deterministic WebRTC Setup ---
+  // --- 3. Deterministic WebRTC Setup ---
   function initPeerConnection() {
     if (rtcPeer) return rtcPeer;
 
     rtcPeer = new RTCPeerConnection(rtcConfig);
 
-    rtcPeer.onicecandidate = (e) => {
-      if (e.candidate) {
-        sendSignal({ type: 'ICE_CANDIDATE', candidate: e.candidate });
-      }
-    };
-
     rtcPeer.oniceconnectionstatechange = () => {
-      console.log('[ICE State]', rtcPeer.iceConnectionState);
       if (rtcPeer.iceConnectionState === 'connected' || rtcPeer.iceConnectionState === 'completed') {
         logStatus('Direct P2P Synced');
       }
@@ -210,57 +203,40 @@
 
     if (isHost) {
       if (data.type === 'GUEST_JOINED') {
-        logStatus('Guest detected! Creating offer...');
+        logStatus('Guest detected! Packaging complete Offer...');
         const peer = initPeerConnection();
         try {
           const offer = await peer.createOffer();
           await peer.setLocalDescription(offer);
-          sendSignal({ type: 'OFFER', sdp: peer.localDescription });
+          await waitForIceGathering(peer);
+          await sendSignal({ type: 'OFFER', sdp: peer.localDescription.sdp });
         } catch (err) {
-          console.error('Host offer error:', err);
+          console.error('Host offer creation error:', err);
         }
       } else if (data.type === 'ANSWER') {
-        logStatus('Received answer. Linking...');
+        logStatus('Answer received! Finalizing connection...');
         if (rtcPeer && rtcPeer.signalingState === 'have-local-offer') {
-          await rtcPeer.setRemoteDescription(new RTCSessionDescription(data.sdp));
-          while (iceCandidateQueue.length > 0) {
-            await rtcPeer.addIceCandidate(iceCandidateQueue.shift());
-          }
+          await rtcPeer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
         }
-      } else if (data.type === 'ICE_CANDIDATE') {
-        applyIceCandidate(data.candidate);
       }
     } else {
       if (data.type === 'OFFER') {
-        logStatus('Received offer. Creating answer...');
+        logStatus('Host offer received! Packaging complete Answer...');
         const peer = initPeerConnection();
         try {
-          await peer.setRemoteDescription(new RTCSessionDescription(data.sdp));
-          while (iceCandidateQueue.length > 0) {
-            await peer.addIceCandidate(iceCandidateQueue.shift());
-          }
+          await peer.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }));
           const answer = await peer.createAnswer();
           await peer.setLocalDescription(answer);
-          sendSignal({ type: 'ANSWER', sdp: peer.localDescription });
+          await waitForIceGathering(peer);
+          await sendSignal({ type: 'ANSWER', sdp: peer.localDescription.sdp });
         } catch (err) {
-          console.error('Guest answer error:', err);
+          console.error('Guest answer creation error:', err);
         }
-      } else if (data.type === 'ICE_CANDIDATE') {
-        applyIceCandidate(data.candidate);
       }
     }
   }
 
-  function applyIceCandidate(candidateData) {
-    const candidate = new RTCIceCandidate(candidateData);
-    if (rtcPeer && rtcPeer.remoteDescription && rtcPeer.remoteDescription.type) {
-      rtcPeer.addIceCandidate(candidate).catch((e) => console.warn('ICE add error:', e));
-    } else {
-      iceCandidateQueue.push(candidate);
-    }
-  }
-
-  // --- 3. DataChannel Setup ---
+  // --- 4. DataChannel Setup ---
   function bindDataChannel(channel) {
     channel.onopen = () => {
       clearTimeout(pollTimer);
@@ -290,7 +266,7 @@
           showToast(`Received ${data.name}`);
         }
       } catch (err) {
-        console.warn('Channel parse error:', err);
+        console.warn('Channel error:', err);
       }
     };
 
@@ -301,26 +277,27 @@
     };
   }
 
-  function startSignaling() {
+  async function startSignaling() {
     logStatus(isHost ? 'Signaling ready. Scan QR with 2nd device!' : 'Connecting to Host...');
     updateStatus(false, 'Ready');
 
-    if (!isHost) {
-      const announceInterval = setInterval(() => {
-        if (!dataChannel || dataChannel.readyState !== 'open') {
-          sendSignal({ type: 'GUEST_JOINED' });
-        } else {
-          clearInterval(announceInterval);
-        }
-      }, 1500);
+    clearTimeout(pollTimer);
+
+    // Host seeds listen key with empty object to prevent initial 404 in DevTools
+    if (isHost) {
+      try {
+        await fetch(listenBucketUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' });
+      } catch (e) {}
+    } else {
+      // Guest immediately alerts the host
       sendSignal({ type: 'GUEST_JOINED' });
     }
 
-    pollTimer = setTimeout(pollSignaling, 300);
+    pollTimer = setTimeout(pollSignaling, 1000);
   }
 
-  // --- 4. Application Initialization ---
-  function initApp() {
+  // --- 5. Application Initialization ---
+  async function initApp() {
     editor = document.getElementById('editor');
     chars = document.getElementById('chars');
     roomCodeDisplay = document.getElementById('roomCodeDisplay');
@@ -347,15 +324,18 @@
 
     const rawHash = window.location.hash.replace('#', '').trim().toLowerCase();
     const isGuestParam = rawHash.includes('role=guest');
-    const cleanRoomCode = rawHash.split('?')[0].replace(/[^a-z0-9]/g, '');
+    const mainHash = rawHash.split('?')[0];
 
-    if (!cleanRoomCode) {
-      activeRoom = generateSlug();
-      isHost = true;
-      window.history.replaceState(null, '', '#' + activeRoom);
-    } else {
-      activeRoom = cleanRoomCode;
+    if (mainHash.includes('_')) {
+      const parts = mainHash.split('_');
+      activeRoom = parts[0].replace(/[^a-z0-9]/g, '');
+      bucketId = parts[1].replace(/[^a-z0-9]/g, '');
       isHost = !isGuestParam;
+    } else {
+      activeRoom = generateSlug();
+      bucketId = 'b_' + Math.random().toString(36).substring(2, 10);
+      isHost = true;
+      window.history.replaceState(null, '', `#${activeRoom}_${bucketId}`);
     }
 
     if (roomCodeDisplay) {
@@ -366,11 +346,11 @@
 
     // Dedicated key endpoints: Host writes h2g & reads g2h; Guest writes g2h & reads h2g
     if (isHost) {
-      sendBucketUrl = `${KV_BUCKET}/${activeRoom}_h2g`;
-      listenBucketUrl = `${KV_BUCKET}/${activeRoom}_g2h`;
+      sendBucketUrl = `${KV_BASE}/4y2N6o1QfHqG3qUf1zHq4A/${activeRoom}_${bucketId}_h2g`;
+      listenBucketUrl = `${KV_BASE}/4y2N6o1QfHqG3qUf1zHq4A/${activeRoom}_${bucketId}_g2h`;
     } else {
-      sendBucketUrl = `${KV_BUCKET}/${activeRoom}_g2h`;
-      listenBucketUrl = `${KV_BUCKET}/${activeRoom}_h2g`;
+      sendBucketUrl = `${KV_BASE}/4y2N6o1QfHqG3qUf1zHq4A/${activeRoom}_${bucketId}_g2h`;
+      listenBucketUrl = `${KV_BASE}/4y2N6o1QfHqG3qUf1zHq4A/${activeRoom}_${bucketId}_h2g`;
     }
 
     if (editor) {
@@ -426,7 +406,7 @@
         if (confirm('Start a new room?')) {
           localStorage.removeItem(cacheKey);
           clearTimeout(pollTimer);
-          window.location.hash = generateSlug();
+          window.location.hash = '';
           window.location.reload();
         }
       });
@@ -434,7 +414,7 @@
 
     if (joinBtn && joinInput) {
       joinBtn.addEventListener('click', () => {
-        const code = joinInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+        const code = joinInput.value.trim().toLowerCase();
         if (!code) return;
         window.location.hash = code + '?role=guest';
         window.location.reload();
