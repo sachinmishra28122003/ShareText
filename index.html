@@ -4,15 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AirText — Instant P2P Sync & Transfer</title>
-  <link rel="stylesheet" href="./style.css?v=2.0.0" />
-  <script src="./paho-mqtt.min.js"></script>
-<script src="./qrcode.min.js"></script>
-  
+  <link rel="stylesheet" href="./style.css?v=3.1.0" />
+
+  <!-- Only Paho MQTT and QRCode are needed (No PeerJS) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.3/paho-mqtt.min.js"></script>
-  
-  <!-- PeerJS for WebRTC Mesh -->
-  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
-  <!-- Fast QR Code Library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
@@ -30,20 +25,19 @@
     </div>
   </nav>
 
-  <!-- Main Container -->
+  <!-- Main Workspace -->
   <main class="workspace">
     <header class="hero">
       <h1>Share Text & Files Instantly</h1>
-      <p>Direct WebRTC P2P sync. Real-time text mirror and encrypted file sharing.</p>
+      <p>Direct WebRTC P2P sync across any enterprise firewall or mobile network.</p>
     </header>
 
-    <!-- Room Control Bar -->
     <section class="room-bar">
       <div class="room-current">
         <span>Room:</span>
         <span class="room-code" id="roomCodeDisplay">...</span>
         <button class="nav-btn" id="copyLinkBtn">Copy Link</button>
-        <button class="btn-reset" id="resetRoomBtn" title="Reset room and clear cache">Reset Room 🔄</button>
+        <button class="btn-reset" id="resetRoomBtn">Reset Room 🔄</button>
       </div>
       <div class="room-inputs">
         <input type="text" id="joinInput" placeholder="Join room code..." maxlength="20" />
@@ -51,7 +45,6 @@
       </div>
     </section>
 
-    <!-- Notepad & File Transfer Card -->
     <section class="editor-container" id="editorCard">
       <div class="editor-top">
         <span id="networkText">Initializing network...</span>
@@ -59,7 +52,6 @@
       </div>
       <textarea id="editor" placeholder="Type prompt, notes, or code here..." spellcheck="false"></textarea>
       
-      <!-- Received / Sent Files Deck -->
       <div class="files-deck" id="filesDeck"></div>
 
       <div class="editor-bottom">
@@ -70,7 +62,7 @@
         </div>
         <div class="actions">
           <input type="file" id="fileInput" style="display: none;" />
-          <button class="btn-sm" id="sendFileBtn" title="Send a file to connected device">📎 Send File</button>
+          <button class="btn-sm" id="sendFileBtn">📎 Send File</button>
           <button class="btn-sm" id="clearBtn">Clear</button>
           <button class="btn-sm primary" id="copyBtn">Copy Text</button>
         </div>
@@ -78,11 +70,11 @@
     </section>
   </main>
 
-  <!-- QR Pairing Modal -->
+  <!-- QR Modal -->
   <div class="modal-wrap" id="qrModal" role="dialog" aria-modal="true">
     <div class="modal-card">
       <h3>Scan to Pair Device</h3>
-      <p class="modal-sub">Scan with phone camera to connect automatically</p>
+      <p class="modal-sub">Scan with phone camera or Android app</p>
       <div id="qrCanvas"></div>
       <button class="btn-sm" id="closeModalBtn" style="width: 100%;">Close</button>
     </div>
@@ -90,6 +82,7 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="./app.js?v=2.0.0"></script>
+  <script src="./app.js?v=3.1.0"></script>
 </body>
 </html>
+
