@@ -1,4 +1,4 @@
-// --- AirText: Zero-Dependency Corporate-Safe WebRTC Sync (Vanilla ICE Engine) ---
+// --- AirText: Zero-Dependency Corporate WebRTC (Self-Cleaning Firebase REST) ---
 (function () {
   'use strict';
 
@@ -17,14 +17,12 @@
 
   let isHost = true;
   let activeRoom = '';
-  let bucketId = '';
   let cacheKey = '';
-  let sendBucketUrl = '';
-  let listenBucketUrl = '';
 
-  const KV_BASE = 'https://kvdb.io';
+  // ⚠️ REPLACE THIS WITH YOUR REALTIME DATABASE URL (No trailing slash)
+  const FIREBASE_BASE = 'https://airtext-relay-default-rtdb.firebaseio.com/';
 
-  // Enterprise TURN servers over Port 443 TCP to punch through corporate symmetric firewalls
+  // Free TURN relays over Port 443 TCP to punch through corporate symmetric firewalls
   const rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -51,7 +49,7 @@
   }
 
   function getFullShareUrl() {
-    return `${window.location.origin}${window.location.pathname}#${activeRoom}_${bucketId}?role=guest`;
+    return `${window.location.origin}${window.location.pathname}#${activeRoom}?role=guest`;
   }
 
   function logStatus(msg) {
@@ -103,7 +101,7 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Robust Vanilla ICE Candidate Collector ---
+  // Gather STUN/TURN candidates directly into the initial SDP description
   function waitForIceGathering(pc) {
     return new Promise((resolve) => {
       if (pc.iceGatheringState === 'complete') {
@@ -116,7 +114,6 @@
           }
         };
         pc.addEventListener('icegatheringstatechange', checkState);
-        // Fallback cap at 1.2s so link negotiation never hangs
         setTimeout(() => {
           pc.removeEventListener('icegatheringstatechange', checkState);
           resolve();
@@ -125,21 +122,21 @@
     });
   }
 
-  // --- 2. Key-Value HTTPS Signaling ---
+  // --- 1. Cloud-Optimized Firebase REST Signaling ---
   async function sendSignal(payload) {
+    const targetPath = isHost ? 'h2g' : 'g2h';
     const packet = {
       mid: Math.random().toString(36).substring(2, 9),
       time: Date.now(),
       ...payload
     };
     try {
-      await fetch(sendBucketUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain' },
+      await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/${targetPath}.json`, {
+        method: 'PUT',
         body: JSON.stringify(packet)
       });
     } catch (e) {
-      console.warn('Signaling push error:', e);
+      console.warn('Firebase push error:', e);
     }
   }
 
@@ -148,20 +145,18 @@
     if (isPolling) return;
     isPolling = true;
 
+    const listenPath = isHost ? 'g2h' : 'h2g';
     try {
-      const res = await fetch(`${listenBucketUrl}?t=${Date.now()}`);
-      if (res.status === 200) {
-        const text = await res.text();
-        if (text && text.trim().length > 5) {
-          const msg = JSON.parse(text);
-          if (msg && msg.mid && msg.mid !== lastHandledMessageId) {
-            lastHandledMessageId = msg.mid;
-            handleSignalingMessage(msg);
-          }
+      const res = await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/${listenPath}.json?t=${Date.now()}`);
+      if (res.ok) {
+        const msg = await res.json();
+        if (msg && msg.mid && msg.mid !== lastHandledMessageId) {
+          lastHandledMessageId = msg.mid;
+          handleSignalingMessage(msg);
         }
       }
     } catch (err) {
-      // Suppress temporary network jitter while awaiting peer
+      // Ignore temporary polling glitches
     } finally {
       isPolling = false;
     }
@@ -172,7 +167,17 @@
     }
   }
 
-  // --- 3. Deterministic WebRTC Setup ---
+  // Wipe the signaling room node from Firebase completely to save free storage
+  async function cleanupFirebaseRoom() {
+    try {
+      await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}.json`, {
+        method: 'DELETE'
+      });
+      console.log('[AirText] Cleaned up signaling room from Firebase');
+    } catch (e) {}
+  }
+
+  // --- 2. Deterministic WebRTC Setup ---
   function initPeerConnection() {
     if (rtcPeer) return rtcPeer;
 
@@ -236,10 +241,13 @@
     }
   }
 
-  // --- 4. DataChannel Setup ---
+  // --- 3. DataChannel & Instant Self-Cleanup ---
   function bindDataChannel(channel) {
     channel.onopen = () => {
       clearTimeout(pollTimer);
+
+      // Instant Cleanup: Handshake complete, delete cloud data
+      cleanupFirebaseRoom();
 
       updateStatus(true, 'Direct P2P Synced');
       logStatus('Direct P2P Synced (Firewall Bypassed)');
@@ -283,21 +291,23 @@
 
     clearTimeout(pollTimer);
 
-    // Host seeds listen key with empty object to prevent initial 404 in DevTools
     if (isHost) {
+      // Pre-seed an empty node so GET never returns 404
       try {
-        await fetch(listenBucketUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' });
+        await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}.json`, {
+          method: 'PUT',
+          body: JSON.stringify({ created: Date.now() })
+        });
       } catch (e) {}
     } else {
-      // Guest immediately alerts the host
       sendSignal({ type: 'GUEST_JOINED' });
     }
 
     pollTimer = setTimeout(pollSignaling, 1000);
   }
 
-  // --- 5. Application Initialization ---
-  async function initApp() {
+  // --- 4. Application Initialization ---
+  function initApp() {
     editor = document.getElementById('editor');
     chars = document.getElementById('chars');
     roomCodeDisplay = document.getElementById('roomCodeDisplay');
@@ -324,18 +334,15 @@
 
     const rawHash = window.location.hash.replace('#', '').trim().toLowerCase();
     const isGuestParam = rawHash.includes('role=guest');
-    const mainHash = rawHash.split('?')[0];
+    const cleanRoomCode = rawHash.split('?')[0].replace(/[^a-z0-9]/g, '');
 
-    if (mainHash.includes('_')) {
-      const parts = mainHash.split('_');
-      activeRoom = parts[0].replace(/[^a-z0-9]/g, '');
-      bucketId = parts[1].replace(/[^a-z0-9]/g, '');
-      isHost = !isGuestParam;
-    } else {
+    if (!cleanRoomCode) {
       activeRoom = generateSlug();
-      bucketId = 'b_' + Math.random().toString(36).substring(2, 10);
       isHost = true;
-      window.history.replaceState(null, '', `#${activeRoom}_${bucketId}`);
+      window.history.replaceState(null, '', '#' + activeRoom);
+    } else {
+      activeRoom = cleanRoomCode;
+      isHost = !isGuestParam;
     }
 
     if (roomCodeDisplay) {
@@ -343,15 +350,6 @@
     }
 
     cacheKey = `airtext_draft_${activeRoom}`;
-
-    // Dedicated key endpoints: Host writes h2g & reads g2h; Guest writes g2h & reads h2g
-    if (isHost) {
-      sendBucketUrl = `${KV_BASE}/4y2N6o1QfHqG3qUf1zHq4A/${activeRoom}_${bucketId}_h2g`;
-      listenBucketUrl = `${KV_BASE}/4y2N6o1QfHqG3qUf1zHq4A/${activeRoom}_${bucketId}_g2h`;
-    } else {
-      sendBucketUrl = `${KV_BASE}/4y2N6o1QfHqG3qUf1zHq4A/${activeRoom}_${bucketId}_g2h`;
-      listenBucketUrl = `${KV_BASE}/4y2N6o1QfHqG3qUf1zHq4A/${activeRoom}_${bucketId}_h2g`;
-    }
 
     if (editor) {
       editor.value = localStorage.getItem(cacheKey) || '';
@@ -362,6 +360,7 @@
         updateCharCount();
         localStorage.setItem(cacheKey, editor.value);
 
+        // Text synchronization is 100% P2P over WebRTC DataChannel (0 bytes used on Firebase)
         if (isRemoteInput || !dataChannel || dataChannel.readyState !== 'open') return;
 
         clearTimeout(typingTimer);
@@ -392,6 +391,7 @@
             size: formatFileSize(file.size),
             data: reader.result
           };
+          // File synchronization is 100% P2P over WebRTC DataChannel (0 bytes used on Firebase)
           dataChannel.send(JSON.stringify(payload));
           renderFileCard(file.name, payload.size, reader.result, true);
           showToast(`Sent ${file.name}`);
@@ -404,6 +404,7 @@
     if (resetRoomBtn) {
       resetRoomBtn.addEventListener('click', () => {
         if (confirm('Start a new room?')) {
+          cleanupFirebaseRoom();
           localStorage.removeItem(cacheKey);
           clearTimeout(pollTimer);
           window.location.hash = '';
