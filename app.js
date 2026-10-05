@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  // UI Elements
+  // Elements
   let editor, chars, roomCodeDisplay, networkText, flash, statusDot, statusLabel;
   let peerLabel, clearBtn, copyBtn, copyLinkBtn, resetRoomBtn, joinInput, joinBtn;
   let qrBtn, qrModal, closeModalBtn, qrCanvas, themeBtn, toast, sendFileBtn, fileInput, filesDeck;
@@ -22,14 +22,14 @@
   let sendBucketUrl = '';
   let listenBucketUrl = '';
 
-  // Free Open Relay bucket for AirText
+  // Public, open CORS key-value bucket over standard port 443
   const KV_BUCKET = 'https://kvdb.io/4y2N6o1QfHqG3qUf1zHq4A';
 
   const rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
       {
         urls: 'turns:openrelay.metered.ca:443?transport=tcp',
         username: 'openrelay',
@@ -294,7 +294,7 @@
       sendSignal({ type: 'GUEST_JOINED' });
     }
 
-    pollTimer = setTimeout(pollSignaling, 500);
+    pollTimer = setTimeout(pollSignaling, 300);
   }
 
   // --- 4. Application Initialization ---
@@ -493,4 +493,3 @@
     initApp();
   }
 })();
-
