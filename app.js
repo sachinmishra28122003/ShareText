@@ -1,4 +1,4 @@
-// --- AirText Core Application ---
+// --- AirText Core Application (Firewall-Proof HTTPS Signaling) ---
 (function () {
   'use strict';
 
@@ -10,23 +10,12 @@
   // State Variables
   let rtcPeer = null;
   let dataChannel = null;
-  let mqttClient = null;
   let isRemoteInput = false;
   let handshakeInterval = null;
   let iceCandidateQueue = [];
   let activeRoom = '';
   let cacheKey = '';
-  let brokerIndex = 0;
-
-  const brokers = [
-    // Standard Port 443 TLS (Bypasses 99% of enterprise firewalls)
-    { host: 'broker.emqx.io', port: 443, path: '/mqtt' },
-    // Alternate 443 TLS Mosquitto mirror
-    { host: 'test.mosquitto.org', port: 8081, path: '/mqtt' },
-    // Standard 8084 / 8884 fallback if on mobile hotspot
-    { host: 'broker.hivemq.com', port: 8884, path: '/mqtt' },
-    { host: 'broker.emqx.io', port: 8084, path: '/mqtt' }
-  ];
+  let pollAbortController = null;
 
   const myPeerId = 'peer_' + Math.random().toString(36).substring(2, 9);
   let topic = '';
@@ -52,9 +41,7 @@
   function generateSlug() {
     const c = 'abcdefghjkmnpqrstuvwxyz23456789';
     let s = '';
-    for (let i = 0; i < 6; i++) {
-      s += c[Math.floor(Math.random() * c.length)];
-    }
+    for (let i = 0; i < 6; i++) s += c[Math.floor(Math.random() * c.length)];
     return s;
   }
 
@@ -63,25 +50,17 @@
   }
 
   function updateCharCount() {
-    if (chars && editor) {
-      chars.textContent = `${editor.value.length} characters`;
-    }
+    if (chars && editor) chars.textContent = `${editor.value.length} characters`;
   }
 
   function logDebug(msg) {
     console.log('[AirText]', msg);
-    if (networkText) {
-      networkText.textContent = msg;
-    }
+    if (networkText) networkText.textContent = msg;
   }
 
   function updateStatus(isLive, label) {
-    if (statusDot) {
-      statusDot.className = 'status-dot' + (isLive ? ' active' : '');
-    }
-    if (statusLabel) {
-      statusLabel.textContent = label;
-    }
+    if (statusDot) statusDot.className = 'status-dot' + (isLive ? ' active' : '');
+    if (statusLabel) statusLabel.textContent = label;
   }
 
   function triggerPulse() {
@@ -119,69 +98,83 @@
     filesDeck.prepend(card);
   }
 
-  // --- Signaling Helpers ---
-  function getPaho() {
-    if (typeof window.Paho !== 'undefined' && window.Paho.MQTT) return window.Paho.MQTT;
-    if (typeof Paho !== 'undefined' && Paho.MQTT) return Paho.MQTT;
-    if (typeof Paho !== 'undefined' && Paho.Client) return Paho;
-    return null;
-  }
-
-  function sendSignal(payload) {
-    const pahoLib = getPaho();
-    if (mqttClient && mqttClient.isConnected() && pahoLib) {
-      const msg = new pahoLib.Message(JSON.stringify(payload));
-      msg.destinationName = topic;
-      msg.qos = 1;
-      mqttClient.send(msg);
+  // --- 1. Firewall-Proof HTTPS Signaling (Standard Port 443 via ntfy.sh) ---
+  async function sendSignal(payload) {
+    try {
+      await fetch(`https://ntfy.sh/${topic}`, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      console.warn('Signaling send error:', e);
     }
   }
 
-  function bindDataChannel(channel) {
-    channel.onopen = () => {
+  async function startSignalingListener() {
+    if (pollAbortController) {
+      pollAbortController.abort();
+    }
+    pollAbortController = new AbortController();
+
+    logDebug('Connecting to signaling channel...');
+    updateStatus(false, 'Connecting');
+
+    try {
+      const response = await fetch(`https://ntfy.sh/${topic}/sse`, {
+        signal: pollAbortController.signal
+      });
+
+      if (!response.ok) throw new Error('Signaling response error');
+
+      logDebug('Signaling ready. Scan QR with 2nd device!');
+      updateStatus(false, 'Ready');
+
+      // Continuous handshake ping until WebRTC DataChannel opens
       clearInterval(handshakeInterval);
-      updateStatus(true, 'Direct P2P Synced');
-      logDebug('Direct P2P Synced (Firewall Bypassed)');
-      if (peerLabel) peerLabel.textContent = '1 device connected';
-      showToast('Device connected!');
-
-      if (mqttClient && mqttClient.isConnected()) {
-        try {
-          mqttClient.disconnect();
-        } catch (e) {}
-      }
-
-      if (editor && editor.value) {
-        channel.send(JSON.stringify({ type: 'SYNC_TEXT', text: editor.value }));
-      }
-    };
-
-    channel.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.type === 'SYNC_TEXT' && editor) {
-          isRemoteInput = true;
-          editor.value = data.text;
-          localStorage.setItem(cacheKey, data.text);
-          updateCharCount();
-          triggerPulse();
-          isRemoteInput = false;
-        } else if (data.type === 'SYNC_FILE') {
-          renderFileCard(data.name, data.size, data.data, false);
-          showToast(`Received ${data.name}`);
+      handshakeInterval = setInterval(() => {
+        if (!dataChannel || dataChannel.readyState !== 'open') {
+          sendSignal({ type: 'PING_PEER', from: myPeerId });
+        } else {
+          clearInterval(handshakeInterval);
         }
-      } catch (err) {
-        console.warn('Channel error:', err);
-      }
-    };
+      }, 1500);
 
-    channel.onclose = () => {
-      updateStatus(false, 'Disconnected');
-      if (peerLabel) peerLabel.textContent = '0 devices connected';
-      logDebug('Peer disconnected. Refresh to re-pair.');
-    };
+      sendSignal({ type: 'PING_PEER', from: myPeerId });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            try {
+              const rawData = JSON.parse(line.replace('data:', '').trim());
+              if (rawData && rawData.message) {
+                const signalPayload = JSON.parse(rawData.message);
+                handleSignalingMessage(signalPayload);
+              }
+            } catch (ignore) {}
+          }
+        }
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        console.warn('Signaling connection error:', err);
+        logDebug('Signaling interrupted. Reconnecting...');
+        setTimeout(startSignalingListener, 3000);
+      }
+    }
   }
 
+  // --- 2. WebRTC Peer Handshake ---
   function getOrCreatePeerConnection(isInitiator) {
     if (rtcPeer) return rtcPeer;
 
@@ -221,7 +214,7 @@
   }
 
   function handleSignalingMessage(data) {
-    if (data.from === myPeerId) return;
+    if (!data || data.from === myPeerId) return;
 
     if (data.type === 'PING_PEER') {
       logDebug('Peer detected! Negotiating...');
@@ -261,72 +254,50 @@
     }
   }
 
-  function initSignaling() {
-    const pahoLib = getPaho();
-    if (!pahoLib) {
-      logDebug('Waiting for Paho library...');
-      setTimeout(initSignaling, 300);
-      return;
-    }
+  function bindDataChannel(channel) {
+    channel.onopen = () => {
+      clearInterval(handshakeInterval);
+      if (pollAbortController) {
+        pollAbortController.abort();
+      }
 
-    const currentBroker = brokers[brokerIndex % brokers.length];
-    logDebug(`Connecting to signaling (${currentBroker.host})...`);
+      updateStatus(true, 'Direct P2P Synced');
+      logDebug('Direct P2P Synced (Firewall Bypassed)');
+      if (peerLabel) peerLabel.textContent = '1 device connected';
+      showToast('Device connected!');
 
-    mqttClient = new pahoLib.Client(
-      currentBroker.host,
-      currentBroker.port,
-      currentBroker.path,
-      myPeerId
-    );
-
-    mqttClient.onConnectionLost = (resp) => {
-      if (resp && resp.errorCode !== 0) {
-        logDebug('Signaling lost. Reconnecting...');
-        updateStatus(false, 'Reconnecting');
-        setTimeout(initSignaling, 2000);
+      if (editor && editor.value) {
+        channel.send(JSON.stringify({ type: 'SYNC_TEXT', text: editor.value }));
       }
     };
 
-    mqttClient.onMessageArrived = (msg) => {
+    channel.onmessage = (e) => {
       try {
-        const payload = JSON.parse(msg.payloadString);
-        handleSignalingMessage(payload);
-      } catch (e) {
-        console.warn('Packet decode error:', e);
+        const data = JSON.parse(e.data);
+        if (data.type === 'SYNC_TEXT' && editor) {
+          isRemoteInput = true;
+          editor.value = data.text;
+          localStorage.setItem(cacheKey, data.text);
+          updateCharCount();
+          triggerPulse();
+          isRemoteInput = false;
+        } else if (data.type === 'SYNC_FILE') {
+          renderFileCard(data.name, data.size, data.data, false);
+          showToast(`Received ${data.name}`);
+        }
+      } catch (err) {
+        console.warn('Channel error:', err);
       }
     };
 
-    mqttClient.connect({
-      useSSL: true,
-      timeout: 8,
-      keepAliveInterval: 30,
-      cleanSession: true,
-      onSuccess: () => {
-        mqttClient.subscribe(topic, { qos: 1 });
-        logDebug('Signaling ready. Scan QR with 2nd device!');
-        updateStatus(false, 'Ready');
-
-        clearInterval(handshakeInterval);
-        handshakeInterval = setInterval(() => {
-          if (!dataChannel || dataChannel.readyState !== 'open') {
-            sendSignal({ type: 'PING_PEER', from: myPeerId });
-          } else {
-            clearInterval(handshakeInterval);
-          }
-        }, 1500);
-
-        sendSignal({ type: 'PING_PEER', from: myPeerId });
-      },
-      onFailure: (err) => {
-        console.warn('Broker connect failed:', err);
-        brokerIndex++;
-        logDebug('Switching signaling broker...');
-        setTimeout(initSignaling, 1500);
-      }
-    });
+    channel.onclose = () => {
+      updateStatus(false, 'Disconnected');
+      if (peerLabel) peerLabel.textContent = '0 devices connected';
+      logDebug('Peer disconnected. Refresh to re-pair.');
+    };
   }
 
-  // --- App Initialization (DOM Ready) ---
+  // --- 3. UI and Startup Initialization ---
   function initApp() {
     editor = document.getElementById('editor');
     chars = document.getElementById('chars');
@@ -360,9 +331,9 @@
     if (roomCodeDisplay) {
       roomCodeDisplay.textContent = '#' + activeRoom;
     }
-    topic = `airtext_pub/v2/${activeRoom}`;
-
+    topic = `airtext_sig_${activeRoom}`;
     cacheKey = `airtext_draft_${activeRoom}`;
+
     if (editor) {
       editor.value = localStorage.getItem(cacheKey) || '';
       updateCharCount();
@@ -498,7 +469,7 @@
       });
     }
 
-    initSignaling();
+    startSignalingListener();
   }
 
   if (document.readyState === 'loading') {
@@ -507,3 +478,4 @@
     initApp();
   }
 })();
+
