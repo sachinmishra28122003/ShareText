@@ -1,4 +1,4 @@
-// --- AirText: Clean, Zero-Polling Native WebRTC Link ---
+// --- AirText: Zero-Dependency, Firewall-Proof P2P Sync ---
 (function () {
   'use strict';
 
@@ -7,15 +7,16 @@
   let peerLabel, clearBtn, copyBtn, copyLinkBtn, resetRoomBtn, joinInput, joinBtn;
   let qrBtn, qrModal, closeModalBtn, qrCanvas, themeBtn, toast, sendFileBtn, fileInput, filesDeck;
 
-  // WebRTC & Connection State
+  // WebRTC State
   let rtcPeer = null;
   let dataChannel = null;
-  let sigSocket = null;
   let isRemoteInput = false;
-  let handshakeTimer = null;
+  let pollTimer = null;
+  let isPolling = false;
+  let processedSignalIds = new Set();
   let iceCandidateQueue = [];
 
-  const myPeerId = 'peer_' + Math.random().toString(36).substring(2, 9);
+  const myPeerId = 'p_' + Math.random().toString(36).substring(2, 9);
   let activeRoom = '';
   let cacheKey = '';
 
@@ -28,9 +29,9 @@
   };
 
   function generateSlug() {
-    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+    const c = 'abcdefghjkmnpqrstuvwxyz23456789';
     let s = '';
-    for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    for (let i = 0; i < 6; i++) s += c[Math.floor(Math.random() * c.length)];
     return s;
   }
 
@@ -87,63 +88,75 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Port 443 Native WebSocket Signaling (Zero HTTP Polling) ---
-  function sendSignal(payload) {
-    if (sigSocket && sigSocket.readyState === WebSocket.OPEN) {
-      sigSocket.send(JSON.stringify({ room: activeRoom, ...payload }));
+  // --- 1. Firewall-Proof Open HTTPS Signaling Relay ---
+  // Channel topic is isolated per room and date to prevent rate-limit overlap
+  const dateKey = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const relayEndpoint = `https://ntfy.sh/airtext_${dateKey}_${window.location.hash.replace('#', '').trim().toLowerCase() || 'global'}`;
+
+  async function sendSignal(payload) {
+    const packet = {
+      id: Math.random().toString(36).substring(2, 10),
+      from: myPeerId,
+      ts: Date.now(),
+      ...payload
+    };
+    try {
+      await fetch(relayEndpoint, {
+        method: 'POST',
+        headers: { 'Priority': 'low', 'Title': 'Sig' },
+        body: JSON.stringify(packet)
+      });
+    } catch (e) {
+      console.warn('Signal broadcast failed:', e);
+    }
+  }
+
+  async function pollSignaling() {
+    if (dataChannel && dataChannel.readyState === 'open') return;
+    if (isPolling) return;
+    isPolling = true;
+
+    try {
+      const res = await fetch(`${relayEndpoint}/json?poll=1&since=20s`);
+      if (res.ok) {
+        const text = await res.text();
+        const lines = text.trim().split('\n');
+
+        for (const line of lines) {
+          if (!line) continue;
+          try {
+            const entry = JSON.parse(line);
+            if (entry.event === 'message' && entry.message) {
+              const signal = JSON.parse(entry.message);
+              if (signal && signal.id && !processedSignalIds.has(signal.id)) {
+                processedSignalIds.add(signal.id);
+                handleSignalingMessage(signal);
+              }
+            }
+          } catch (ignore) {}
+        }
+      }
+    } catch (err) {
+      console.warn('Poll error:', err);
+    } finally {
+      isPolling = false;
+    }
+
+    if (!dataChannel || dataChannel.readyState !== 'open') {
+      pollTimer = setTimeout(pollSignaling, 2500);
     }
   }
 
   function initSignaling() {
-    if (dataChannel && dataChannel.readyState === 'open') return;
+    logStatus('Signaling ready. Scan QR with 2nd device!');
+    updateStatus(false, 'Ready');
 
-    logStatus('Connecting to signaling relay...');
-    updateStatus(false, 'Connecting');
+    // Announce presence
+    sendSignal({ type: 'PING_PEER' });
 
-    // Public demo WSS relay running on Standard Port 443 (TLS)
-    const relayUrl = `wss://free.blr2.piesocket.com/v3/${activeRoom}?api_key=VC3OtKXqqNz5MgpHucnhAxnuAvM8frq2&notify_self=0`;
-
-    try {
-      sigSocket = new WebSocket(relayUrl);
-    } catch (e) {
-      logStatus('WSS blocked. Retrying...');
-      setTimeout(initSignaling, 3000);
-      return;
-    }
-
-    sigSocket.onopen = () => {
-      logStatus('Signaling ready. Scan QR with 2nd device!');
-      updateStatus(false, 'Ready');
-
-      clearInterval(handshakeTimer);
-      handshakeTimer = setInterval(() => {
-        if (!dataChannel || dataChannel.readyState !== 'open') {
-          sendSignal({ type: 'PING_PEER', from: myPeerId });
-        } else {
-          clearInterval(handshakeTimer);
-        }
-      }, 2000);
-
-      sendSignal({ type: 'PING_PEER', from: myPeerId });
-    };
-
-    sigSocket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        handleSignalingMessage(data);
-      } catch (e) {}
-    };
-
-    sigSocket.onerror = () => {
-      console.warn('Signaling socket error');
-    };
-
-    sigSocket.onclose = () => {
-      if (!dataChannel || dataChannel.readyState !== 'open') {
-        logStatus('Signaling reconnecting...');
-        setTimeout(initSignaling, 3000);
-      }
-    };
+    // Begin single-thread polling
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(pollSignaling, 1000);
   }
 
   // --- 2. WebRTC Peer Connection ---
@@ -155,7 +168,7 @@
 
     rtcPeer.onicecandidate = (e) => {
       if (e.candidate) {
-        sendSignal({ type: 'ICE_CANDIDATE', candidate: e.candidate, from: myPeerId });
+        sendSignal({ type: 'ICE_CANDIDATE', candidate: e.candidate });
       }
     };
 
@@ -166,7 +179,7 @@
       rtcPeer.createOffer().then((offer) => {
         return rtcPeer.setLocalDescription(offer);
       }).then(() => {
-        sendSignal({ type: 'OFFER', sdp: rtcPeer.localDescription, from: myPeerId });
+        sendSignal({ type: 'OFFER', sdp: rtcPeer.localDescription });
       }).catch((err) => console.error('Offer error:', err));
     } else {
       rtcPeer.ondatachannel = (e) => {
@@ -183,7 +196,7 @@
     if (!data || data.from === myPeerId) return;
 
     if (data.type === 'PING_PEER') {
-      logStatus('Peer detected! Linking...');
+      logStatus('Peer detected! Negotiating...');
       if (myPeerId < data.from && (!rtcPeer || rtcPeer.connectionState === 'disconnected')) {
         getOrCreatePeerConnection(true);
       }
@@ -199,7 +212,7 @@
       }).then((answer) => {
         return peer.setLocalDescription(answer);
       }).then(() => {
-        sendSignal({ type: 'ANSWER', sdp: peer.localDescription, from: myPeerId });
+        sendSignal({ type: 'ANSWER', sdp: peer.localDescription });
       }).catch((err) => console.error('Answer error:', err));
     } else if (data.type === 'ANSWER') {
       logStatus('Finalizing link...');
@@ -220,14 +233,10 @@
     }
   }
 
-  // --- 3. DataChannel Setup ---
+  // --- 3. DataChannel & File Sync ---
   function bindDataChannel(channel) {
     channel.onopen = () => {
-      clearInterval(handshakeTimer);
-      if (sigSocket) {
-        sigSocket.close();
-        sigSocket = null;
-      }
+      clearTimeout(pollTimer);
 
       updateStatus(true, 'Direct P2P Synced');
       logStatus('Direct P2P Synced (Firewall Bypassed)');
@@ -265,7 +274,7 @@
     };
   }
 
-  // --- 4. Application Init ---
+  // --- 4. Application Initialization ---
   function initApp() {
     editor = document.getElementById('editor');
     chars = document.getElementById('chars');
@@ -353,7 +362,7 @@
       resetRoomBtn.addEventListener('click', () => {
         if (confirm('Start a new room?')) {
           localStorage.removeItem(cacheKey);
-          clearInterval(handshakeTimer);
+          clearTimeout(pollTimer);
           window.location.hash = generateSlug();
           window.location.reload();
         }
