@@ -1,3 +1,4 @@
+
 // --- DOM Elements ---
 const editor = document.getElementById('editor');
 const chars = document.getElementById('chars');
@@ -58,15 +59,16 @@ function updateCharCount() {
   chars.textContent = `${editor.value.length} characters`;
 }
 
-// --- 2. Guaranteed WebRTC Engine with TURN + STUN ---
+// --- 2. Resilient WebRTC Engine with Reconnection Watchdog ---
 let peer = null;
 let activeConnection = null;
 let myPeerId = '';
 let isRemoteInput = false;
 let pingTimer = null;
+let reconnectTimer = null;
 
-// Multi-server STUN + Public TURN relays (Crucial for Cellular vs Wi-Fi NAT punching)
 const peerConfig = {
+  debug: 1,
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -91,37 +93,51 @@ function initP2P() {
     try { peer.destroy(); } catch (e) {}
   }
 
-  // Generate a collision-free ID for this session
-  const randomSuffix = Math.random().toString(36).substring(2, 8);
-  myPeerId = `airtext-${activeRoom}-${randomSuffix}`;
+  // Pure random session identifier to avoid 0.peerjs.com collision dropouts
+  const randomSuffix = Math.random().toString(36).substring(2, 9);
+  myPeerId = `air_${activeRoom}_${randomSuffix}`;
 
   peer = new Peer(myPeerId, peerConfig);
 
   peer.on('open', (id) => {
     myPeerId = id;
+    clearTimeout(reconnectTimer);
 
     if (targetPeerId) {
-      // Scanned from QR: Connect directly to the specific host peer
       updateStatus(false, 'Connecting...');
-      networkText.textContent = 'Pairing directly with host...';
+      networkText.textContent = 'Pairing with peer...';
       const conn = peer.connect(targetPeerId, { reliable: true });
       bindDataChannel(conn);
     } else {
-      // Room host: Wait for incoming device
       updateStatus(false, 'Waiting');
       networkText.textContent = 'Ready. Scan QR with your 2nd device!';
       peerLabel.textContent = '0 devices connected';
     }
   });
 
-  // Listen for incoming connection from QR-scanned device
+  // Handle "Lost connection to server" shown in your console
+  peer.on('disconnected', () => {
+    networkText.textContent = 'Signaling blip. Auto-reconnecting...';
+    // Automatically reconnect socket without changing peer identity
+    if (!peer.destroyed) {
+      reconnectTimer = setTimeout(() => {
+        try { peer.reconnect(); } catch (e) {}
+      }, 1500);
+    }
+  });
+
   peer.on('connection', (conn) => {
     bindDataChannel(conn);
   });
 
   peer.on('error', (err) => {
-    console.warn('Signaling error:', err);
-    networkText.textContent = 'Network notice: ' + (err.type || 'Connection issue');
+    console.warn('Peer notice:', err);
+    if (err.type === 'peer-unavailable') {
+      networkText.textContent = 'Host offline. Scan fresh QR code.';
+    } else if (err.type === 'network' || err.type === 'server-error') {
+      networkText.textContent = 'Reconnecting to signaling...';
+      try { peer.reconnect(); } catch (e) {}
+    }
   });
 }
 
@@ -134,18 +150,16 @@ function bindDataChannel(conn) {
     peerLabel.textContent = '1 device connected';
     showToast('Device connected!');
 
-    // Push initial draft
     if (editor.value) {
       conn.send({ type: 'SYNC_TEXT', text: editor.value });
     }
 
-    // Keep-alive ping every 4s to prevent mobile browser sleep
     if (!pingTimer) {
       pingTimer = setInterval(() => {
         if (activeConnection && activeConnection.open) {
           activeConnection.send({ type: 'PING' });
         }
-      }, 4000);
+      }, 3500);
     }
   });
 
@@ -168,12 +182,13 @@ function bindDataChannel(conn) {
 
   conn.on('close', () => {
     updateStatus(false, 'Disconnected');
-    networkText.textContent = 'Device left. Waiting for scan...';
+    networkText.textContent = 'Peer disconnected. Waiting...';
     peerLabel.textContent = '0 devices connected';
     activeConnection = null;
   });
 
-  conn.on('error', () => {
+  conn.on('error', (err) => {
+    console.warn('Channel error:', err);
     updateStatus(false, 'Connection error');
     peerLabel.textContent = '0 devices connected';
     activeConnection = null;
@@ -190,7 +205,6 @@ function triggerPulse() {
   setTimeout(() => flash.classList.remove('show'), 900);
 }
 
-// Generate direct pair URL embedding this machine's exact active ID
 function getDirectPairUrl() {
   const base = `${window.location.origin}${window.location.pathname}#${activeRoom}`;
   return myPeerId ? `${base}:${myPeerId}` : base;
@@ -210,7 +224,7 @@ editor.addEventListener('input', () => {
   }, 80);
 });
 
-// --- 4. File Sharing Implementation ---
+// --- 4. File Sharing ---
 sendFileBtn.addEventListener('click', () => {
   if (!activeConnection || !activeConnection.open) {
     showToast('Wait until devices are linked before sending files');
@@ -263,6 +277,7 @@ resetRoomBtn.addEventListener('click', () => {
   if (confirm('Start a new room? This will disconnect current peers.')) {
     localStorage.removeItem(cacheKey);
     if (pingTimer) clearInterval(pingTimer);
+    clearTimeout(reconnectTimer);
     if (peer) {
       try { peer.destroy(); } catch (e) {}
     }
@@ -356,10 +371,11 @@ function showToast(text) {
 
 window.addEventListener('beforeunload', () => {
   if (pingTimer) clearInterval(pingTimer);
+  clearTimeout(reconnectTimer);
   if (peer) {
     try { peer.destroy(); } catch (e) {}
   }
 });
 
-// Initialize P2P
+// Start engine
 initP2P();
