@@ -104,6 +104,7 @@
   }
 
   // --- 1. Clean Key-Value HTTPS Signaling ---
+ // --- 1. Clean Key-Value HTTPS Signaling ---
   async function sendSignal(payload) {
     const packet = {
       mid: Math.random().toString(36).substring(2, 9),
@@ -111,7 +112,6 @@
       ...payload
     };
     try {
-      // Plain text payload avoids CORS preflight OPTIONS requests
       await fetch(sendBucketUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
@@ -129,9 +129,9 @@
 
     try {
       const res = await fetch(`${listenBucketUrl}?t=${Date.now()}`);
-      if (res.ok) {
+      if (res.status === 200) {
         const text = await res.text();
-        if (text && text.trim().length > 0) {
+        if (text && text.trim().length > 2) {
           const msg = JSON.parse(text);
           if (msg && msg.mid && !processedMessageIds.has(msg.mid)) {
             processedMessageIds.add(msg.mid);
@@ -139,15 +139,37 @@
           }
         }
       }
+      // If 404, the guest has simply not joined yet; continue quietly
     } catch (err) {
-      console.warn('Poll error:', err);
+      // Suppress network jitter logs while waiting
     } finally {
       isPolling = false;
     }
 
     if (!dataChannel || dataChannel.readyState !== 'open') {
-      pollTimer = setTimeout(pollSignaling, 1800);
+      clearTimeout(pollTimer);
+      pollTimer = setTimeout(pollSignaling, 2000);
     }
+  }
+
+  async function startSignaling() {
+    logStatus(isHost ? 'Signaling ready. Scan QR with 2nd device!' : 'Connecting to Host...');
+    updateStatus(false, 'Ready');
+
+    clearTimeout(pollTimer);
+
+    // Host initializes both keys with empty JSON to prevent 404 logs
+    if (isHost) {
+      try {
+        await fetch(sendBucketUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' });
+        await fetch(listenBucketUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' });
+      } catch (e) {}
+    } else {
+      // Guest immediately signals arrival
+      sendSignal({ type: 'GUEST_JOINED' });
+    }
+
+    pollTimer = setTimeout(pollSignaling, 1000);
   }
 
   // --- 2. Deterministic WebRTC Setup ---
