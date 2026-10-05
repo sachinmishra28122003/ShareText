@@ -29,7 +29,6 @@
     ]
   };
 
-  // --- Helper Functions ---
   function generateSlug() {
     const c = 'abcdefghjkmnpqrstuvwxyz23456789';
     let s = '';
@@ -90,7 +89,7 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Pure HTTPS Signaling (Standard Port 443, Zero Blocked Ports) ---
+  // --- 1. Pure HTTPS Signaling ---
   async function sendSignal(payload) {
     try {
       await fetch(`https://ntfy.sh/${topic}`, {
@@ -153,7 +152,7 @@
     sendSignal({ type: 'PING_PEER', from: myPeerId });
   }
 
-  // --- 2. Standard WebRTC Connection ---
+  // --- 2. Standard Native WebRTC Connection ---
   function getOrCreatePeerConnection(isInitiator) {
     if (rtcPeer) return rtcPeer;
 
@@ -449,6 +448,7 @@
     initApp();
   }
 })();
+
 
 
 
