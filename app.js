@@ -103,11 +103,9 @@
   }
 
   async function pollSignaling() {
-    // If WebRTC data channel is established, terminate signaling loop
     if (dataChannel && dataChannel.readyState === 'open') return;
 
     try {
-      // Standard HTTPS JSON fetch - no persistent stream that gets dropped by firewalls
       const url = `https://ntfy.sh/${topic}/json?poll=1&since=${lastSeenTimestamp || '10s'}`;
       const res = await fetch(url);
       if (res.ok) {
@@ -132,7 +130,6 @@
       console.warn('Signaling poll check failed:', err);
     }
 
-    // Schedule next poll
     if (!dataChannel || dataChannel.readyState !== 'open') {
       signalingTimer = setTimeout(pollSignaling, 1000);
     }
@@ -142,10 +139,8 @@
     logStatus('Signaling ready. Scan QR with 2nd device!');
     updateStatus(false, 'Ready');
 
-    // Poll every 1s
     pollSignaling();
 
-    // Heartbeat every 1.5s until P2P channel opens
     clearInterval(handshakeTimer);
     handshakeTimer = setInterval(() => {
       if (!dataChannel || dataChannel.readyState !== 'open') {
@@ -196,7 +191,6 @@
 
     if (data.type === 'PING_PEER') {
       logStatus('Peer detected! Negotiating link...');
-      // Tie-breaker: smaller peer ID becomes initiator
       if (myPeerId < data.from && (!rtcPeer || rtcPeer.connectionState === 'disconnected')) {
         getOrCreatePeerConnection(true);
       }
@@ -236,7 +230,6 @@
   // --- 3. DataChannel Setup ---
   function bindDataChannel(channel) {
     channel.onopen = () => {
-      // Clean up signaling timers once P2P is live
       clearTimeout(signalingTimer);
       clearInterval(handshakeTimer);
 
@@ -456,6 +449,7 @@
     initApp();
   }
 })();
+
 
 
 
