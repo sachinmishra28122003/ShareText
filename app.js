@@ -1,25 +1,26 @@
-// --- AirText Core Application (Firewall-Proof HTTPS Signaling) ---
+// --- AirText: Clean & Reliable P2P Sync (Firewall-Proof HTTPS Signaling) ---
 (function () {
   'use strict';
 
-  // Elements map
+  // UI Elements
   let editor, chars, roomCodeDisplay, networkText, flash, statusDot, statusLabel;
   let peerLabel, clearBtn, copyBtn, copyLinkBtn, resetRoomBtn, joinInput, joinBtn;
   let qrBtn, qrModal, closeModalBtn, qrCanvas, themeBtn, toast, sendFileBtn, fileInput, filesDeck;
 
-  // State Variables
+  // WebRTC & Signaling State
   let rtcPeer = null;
   let dataChannel = null;
+  let sseSource = null;
+  let handshakeTimer = null;
   let isRemoteInput = false;
-  let handshakeInterval = null;
   let iceCandidateQueue = [];
-  let activeRoom = '';
-  let cacheKey = '';
-  let pollAbortController = null;
 
   const myPeerId = 'peer_' + Math.random().toString(36).substring(2, 9);
+  let activeRoom = '';
   let topic = '';
+  let cacheKey = '';
 
+  // Free, globally accessible STUN & TURN servers
   const rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -38,22 +39,21 @@
     ]
   };
 
+  // --- Helper Functions ---
   function generateSlug() {
-    const c = 'abcdefghjkmnpqrstuvwxyz23456789';
-    let s = '';
-    for (let i = 0; i < 6; i++) s += c[Math.floor(Math.random() * c.length)];
-    return s;
+    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+    let slug = '';
+    for (let i = 0; i < 6; i++) {
+      slug += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return slug;
   }
 
   function getFullShareUrl() {
     return `${window.location.origin}${window.location.pathname}#${activeRoom}`;
   }
 
-  function updateCharCount() {
-    if (chars && editor) chars.textContent = `${editor.value.length} characters`;
-  }
-
-  function logDebug(msg) {
+  function logStatus(msg) {
     console.log('[AirText]', msg);
     if (networkText) networkText.textContent = msg;
   }
@@ -63,6 +63,14 @@
     if (statusLabel) statusLabel.textContent = label;
   }
 
+  function showToast(text) {
+    if (toast) {
+      toast.textContent = text;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 2000);
+    }
+  }
+
   function triggerPulse() {
     if (flash) {
       flash.classList.add('show');
@@ -70,12 +78,8 @@
     }
   }
 
-  function showToast(text) {
-    if (toast) {
-      toast.textContent = text;
-      toast.classList.add('show');
-      setTimeout(() => toast.classList.remove('show'), 2000);
-    }
+  function updateCharCount() {
+    if (chars && editor) chars.textContent = `${editor.value.length} characters`;
   }
 
   function formatFileSize(bytes) {
@@ -98,98 +102,73 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Firewall-Proof HTTPS Signaling (Standard Port 443 via ntfy.sh) ---
+  // --- 1. Signaling (Port 443 HTTPS & SSE) ---
   async function sendSignal(payload) {
     try {
       await fetch(`https://ntfy.sh/${topic}`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
     } catch (e) {
-      console.warn('Signaling send error:', e);
+      console.warn('Signaling send failed:', e);
     }
   }
 
-  async function startSignalingListener() {
-    if (pollAbortController) {
-      pollAbortController.abort();
+  function initSignaling() {
+    if (sseSource) {
+      sseSource.close();
+      sseSource = null;
     }
-    pollAbortController = new AbortController();
 
-    logDebug('Connecting to signaling channel...');
+    logStatus('Connecting to signaling channel...');
     updateStatus(false, 'Connecting');
 
-    try {
-      const response = await fetch(`https://ntfy.sh/${topic}/sse`, {
-        signal: pollAbortController.signal
-      });
+    sseSource = new EventSource(`https://ntfy.sh/${topic}/sse`);
 
-      if (!response.ok) throw new Error('Signaling response error');
-
-      logDebug('Signaling ready. Scan QR with 2nd device!');
+    sseSource.onopen = () => {
+      logStatus('Signaling ready. Scan QR with 2nd device!');
       updateStatus(false, 'Ready');
 
-      // Continuous handshake ping until WebRTC DataChannel opens
-      clearInterval(handshakeInterval);
-      handshakeInterval = setInterval(() => {
+      // Continuous peer discovery heartbeat until P2P channel opens
+      clearInterval(handshakeTimer);
+      handshakeTimer = setInterval(() => {
         if (!dataChannel || dataChannel.readyState !== 'open') {
           sendSignal({ type: 'PING_PEER', from: myPeerId });
         } else {
-          clearInterval(handshakeInterval);
+          clearInterval(handshakeTimer);
         }
       }, 1500);
 
       sendSignal({ type: 'PING_PEER', from: myPeerId });
+    };
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-
-        for (const line of lines) {
-          if (line.startsWith('data:')) {
-            try {
-              const rawData = JSON.parse(line.replace('data:', '').trim());
-              if (rawData && rawData.message) {
-                const signalPayload = JSON.parse(rawData.message);
-                handleSignalingMessage(signalPayload);
-              }
-            } catch (ignore) {}
-          }
+    sseSource.onmessage = (event) => {
+      try {
+        const raw = JSON.parse(event.data);
+        if (raw && raw.message) {
+          const payload = JSON.parse(raw.message);
+          handleSignalingMessage(payload);
         }
-      }
-    } catch (err) {
-      if (err.name !== 'AbortError') {
-        console.warn('Signaling connection error:', err);
-        logDebug('Signaling interrupted. Reconnecting...');
-        setTimeout(startSignalingListener, 3000);
-      }
-    }
+      } catch (ignore) {}
+    };
+
+    sseSource.onerror = () => {
+      // EventSource reconnects natively in the background without UI disruption
+      console.warn('SSE stream re-syncing...');
+    };
   }
 
-  // --- 2. WebRTC Peer Handshake ---
+  // --- 2. WebRTC Peer Connection ---
   function getOrCreatePeerConnection(isInitiator) {
     if (rtcPeer) return rtcPeer;
 
-    logDebug(isInitiator ? 'Initiating WebRTC offer...' : 'Waiting for WebRTC offer...');
+    logStatus(isInitiator ? 'Initiating P2P offer...' : 'Waiting for P2P offer...');
     rtcPeer = new RTCPeerConnection(rtcConfig);
 
     rtcPeer.onicecandidate = (e) => {
       if (e.candidate) {
         sendSignal({ type: 'ICE_CANDIDATE', candidate: e.candidate, from: myPeerId });
-      }
-    };
-
-    rtcPeer.oniceconnectionstatechange = () => {
-      if (rtcPeer && rtcPeer.iceConnectionState === 'connected') {
-        logDebug('Direct P2P Synced');
       }
     };
 
@@ -201,10 +180,10 @@
         return rtcPeer.setLocalDescription(offer);
       }).then(() => {
         sendSignal({ type: 'OFFER', sdp: rtcPeer.localDescription, from: myPeerId });
-      }).catch((e) => console.error('Offer error:', e));
+      }).catch((err) => console.error('Offer error:', err));
     } else {
       rtcPeer.ondatachannel = (e) => {
-        logDebug('Data channel received!');
+        logStatus('Data channel connected!');
         dataChannel = e.channel;
         bindDataChannel(dataChannel);
       };
@@ -217,12 +196,13 @@
     if (!data || data.from === myPeerId) return;
 
     if (data.type === 'PING_PEER') {
-      logDebug('Peer detected! Negotiating...');
+      logStatus('Peer detected! Negotiating link...');
+      // Lexicographical tie-breaker ensures exactly one device creates the offer
       if (myPeerId < data.from && (!rtcPeer || rtcPeer.connectionState === 'disconnected')) {
         getOrCreatePeerConnection(true);
       }
     } else if (data.type === 'OFFER') {
-      logDebug('Received offer. Creating answer...');
+      logStatus('Received offer. Answering...');
       const peer = getOrCreatePeerConnection(false);
 
       peer.setRemoteDescription(new RTCSessionDescription(data.sdp)).then(() => {
@@ -234,35 +214,39 @@
         return peer.setLocalDescription(answer);
       }).then(() => {
         sendSignal({ type: 'ANSWER', sdp: peer.localDescription, from: myPeerId });
-      }).catch((e) => console.error('Answer error:', e));
+      }).catch((err) => console.error('Answer error:', err));
     } else if (data.type === 'ANSWER') {
-      logDebug('Received answer. Finalizing link...');
+      logStatus('Finalizing P2P link...');
       if (rtcPeer) {
         rtcPeer.setRemoteDescription(new RTCSessionDescription(data.sdp)).then(() => {
           while (iceCandidateQueue.length > 0) {
             rtcPeer.addIceCandidate(iceCandidateQueue.shift());
           }
-        }).catch((e) => console.error('Remote desc error:', e));
+        }).catch((err) => console.error('Remote desc error:', err));
       }
     } else if (data.type === 'ICE_CANDIDATE') {
-      const cand = new RTCIceCandidate(data.candidate);
+      const candidate = new RTCIceCandidate(data.candidate);
       if (rtcPeer && rtcPeer.remoteDescription) {
-        rtcPeer.addIceCandidate(cand).catch((e) => console.warn('ICE add error:', e));
+        rtcPeer.addIceCandidate(candidate).catch((e) => console.warn('ICE add error:', e));
       } else {
-        iceCandidateQueue.push(cand);
+        iceCandidateQueue.push(candidate);
       }
     }
   }
 
+  // --- 3. DataChannel Sync & File Transfer ---
   function bindDataChannel(channel) {
     channel.onopen = () => {
-      clearInterval(handshakeInterval);
-      if (pollAbortController) {
-        pollAbortController.abort();
+      clearInterval(handshakeTimer);
+
+      // Close signaling stream — the link is now 100% direct P2P
+      if (sseSource) {
+        sseSource.close();
+        sseSource = null;
       }
 
       updateStatus(true, 'Direct P2P Synced');
-      logDebug('Direct P2P Synced (Firewall Bypassed)');
+      logStatus('Direct P2P Synced (Firewall Bypassed)');
       if (peerLabel) peerLabel.textContent = '1 device connected';
       showToast('Device connected!');
 
@@ -286,18 +270,18 @@
           showToast(`Received ${data.name}`);
         }
       } catch (err) {
-        console.warn('Channel error:', err);
+        console.warn('Channel parse error:', err);
       }
     };
 
     channel.onclose = () => {
       updateStatus(false, 'Disconnected');
       if (peerLabel) peerLabel.textContent = '0 devices connected';
-      logDebug('Peer disconnected. Refresh to re-pair.');
+      logStatus('Peer disconnected. Refresh page to pair again.');
     };
   }
 
-  // --- 3. UI and Startup Initialization ---
+  // --- 4. Application Initialization ---
   function initApp() {
     editor = document.getElementById('editor');
     chars = document.getElementById('chars');
@@ -323,6 +307,7 @@
     fileInput = document.getElementById('fileInput');
     filesDeck = document.getElementById('filesDeck');
 
+    // Parse or generate room hash
     activeRoom = window.location.hash.replace('#', '').trim().toLowerCase();
     if (!activeRoom) {
       activeRoom = generateSlug();
@@ -331,6 +316,7 @@
     if (roomCodeDisplay) {
       roomCodeDisplay.textContent = '#' + activeRoom;
     }
+
     topic = `airtext_sig_${activeRoom}`;
     cacheKey = `airtext_draft_${activeRoom}`;
 
@@ -386,9 +372,8 @@
       resetRoomBtn.addEventListener('click', () => {
         if (confirm('Start a new room?')) {
           localStorage.removeItem(cacheKey);
-          clearInterval(handshakeInterval);
-          const fresh = generateSlug();
-          window.location.hash = fresh;
+          clearInterval(handshakeTimer);
+          window.location.hash = generateSlug();
           window.location.reload();
         }
       });
@@ -432,11 +417,9 @@
     if (qrBtn && qrModal && qrCanvas) {
       qrBtn.addEventListener('click', () => {
         qrCanvas.innerHTML = '';
-        const shareUrl = getFullShareUrl();
-
         if (typeof window.QRCode !== 'undefined') {
           new window.QRCode(qrCanvas, {
-            text: shareUrl,
+            text: getFullShareUrl(),
             width: 180,
             height: 180,
             colorDark: '#0a0b0e',
@@ -469,13 +452,15 @@
       });
     }
 
-    startSignalingListener();
+    initSignaling();
   }
 
+  // Ensure DOM is constructed before querying elements
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initApp);
   } else {
     initApp();
   }
 })();
+
 
