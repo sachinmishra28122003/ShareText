@@ -1,4 +1,4 @@
-// --- AirText: Glare-Free Corporate WebRTC Engine ---
+// --- AirText: Deterministic Split-Channel WebRTC Sync ---
 (function () {
   'use strict';
 
@@ -13,17 +13,15 @@
   let isRemoteInput = false;
   let pollTimer = null;
   let isPolling = false;
-  let handshakeTimer = null;
   let iceCandidateQueue = [];
   const processedMessageIds = new Set();
 
-  const mySessionId = 's_' + Math.random().toString(36).substring(2, 9);
-  const sessionStartTime = Date.now();
+  let isHost = true;
   let activeRoom = '';
   let cacheKey = '';
-  let relayEndpoint = '';
+  let sendChannelUrl = '';
+  let listenChannelUrl = '';
 
-  // Free TURN relay on Port 443 TCP for corporate symmetric NATs
   const rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -50,7 +48,8 @@
   }
 
   function getFullShareUrl() {
-    return `${window.location.origin}${window.location.pathname}#${activeRoom}`;
+    // When sharing or generating QR, flag the second device as guest
+    return `${window.location.origin}${window.location.pathname}#${activeRoom}?role=guest`;
   }
 
   function logStatus(msg) {
@@ -102,22 +101,21 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Freshness-Guarded HTTPS Signaling ---
+  // --- 1. Split-Channel HTTPS Signaling (Zero Echo/Glare) ---
   async function sendSignal(payload) {
     const packet = {
       mid: Math.random().toString(36).substring(2, 9),
-      sender: mySessionId,
       time: Date.now(),
       ...payload
     };
     try {
-      await fetch(relayEndpoint, {
+      await fetch(sendChannelUrl, {
         method: 'POST',
-        headers: { 'Priority': 'low', 'Title': 'Sig' },
+        headers: { 'Priority': 'low', 'Title': 'AirText' },
         body: JSON.stringify(packet)
       });
     } catch (e) {
-      console.warn('Signal send failed:', e);
+      console.warn('Signaling send error:', e);
     }
   }
 
@@ -127,8 +125,7 @@
     isPolling = true;
 
     try {
-      // Poll recent 6 seconds only so old session messages are never accepted
-      const res = await fetch(`${relayEndpoint}/json?poll=1&since=6s`);
+      const res = await fetch(`${listenChannelUrl}/json?poll=1&since=8s`);
       if (res.ok) {
         const text = await res.text();
         const lines = text.trim().split('\n');
@@ -139,13 +136,10 @@
             const entry = JSON.parse(line);
             if (entry.event === 'message' && entry.message) {
               const msg = JSON.parse(entry.message);
-
-              // Discard messages sent before this page loaded or already processed
-              if (!msg || !msg.mid || processedMessageIds.has(msg.mid)) continue;
-              if (msg.time && msg.time < sessionStartTime - 3000) continue;
-
-              processedMessageIds.add(msg.mid);
-              handleSignalingMessage(msg);
+              if (msg && msg.mid && !processedMessageIds.has(msg.mid)) {
+                processedMessageIds.add(msg.mid);
+                handleSignalingMessage(msg);
+              }
             }
           } catch (ignore) {}
         }
@@ -157,15 +151,14 @@
     }
 
     if (!dataChannel || dataChannel.readyState !== 'open') {
-      pollTimer = setTimeout(pollSignaling, 1800);
+      pollTimer = setTimeout(pollSignaling, 2000);
     }
   }
 
-  // --- 2. Deterministic Glare-Free WebRTC (Tie-Breaker Initiator) ---
-  function getOrCreatePeerConnection(isInitiator) {
+  // --- 2. Deterministic WebRTC Setup ---
+  function initPeerConnection() {
     if (rtcPeer) return rtcPeer;
 
-    logStatus(isInitiator ? 'Negotiating (Offer)...' : 'Negotiating (Answer)...');
     rtcPeer = new RTCPeerConnection(rtcConfig);
 
     rtcPeer.onicecandidate = (e) => {
@@ -181,18 +174,14 @@
       }
     };
 
-    if (isInitiator) {
+    if (isHost) {
+      // Host creates the DataChannel and waits for the guest to join
       dataChannel = rtcPeer.createDataChannel('airtext_channel', { reliable: true });
       bindDataChannel(dataChannel);
-
-      rtcPeer.createOffer().then((offer) => {
-        return rtcPeer.setLocalDescription(offer);
-      }).then(() => {
-        sendSignal({ type: 'OFFER', sdp: rtcPeer.localDescription });
-      }).catch((err) => console.error('Offer error:', err));
     } else {
+      // Guest listens for incoming DataChannel
       rtcPeer.ondatachannel = (e) => {
-        logStatus('Data link opened!');
+        logStatus('Data link connected!');
         dataChannel = e.channel;
         bindDataChannel(dataChannel);
       };
@@ -201,50 +190,60 @@
     return rtcPeer;
   }
 
-  function handleSignalingMessage(data) {
-    if (!data || data.sender === mySessionId) return;
+  async function handleSignalingMessage(data) {
+    if (!data || !data.type) return;
 
-    if (data.type === 'PING') {
-      logStatus('Peer detected! Linking...');
-      // Strict tie-breaker: device with lexicographically smaller ID initiates
-      if (mySessionId < data.sender && (!rtcPeer || rtcPeer.signalingState === 'stable' && !dataChannel)) {
-        getOrCreatePeerConnection(true);
-      }
-    } else if (data.type === 'OFFER') {
-      logStatus('Processing offer...');
-      const peer = getOrCreatePeerConnection(false);
-
-      // If we are already negotiating or have a local offer, gracefully roll back if polite
-      if (peer.signalingState !== 'stable') {
-        if (mySessionId < data.sender) return; // We are impolite; ignore conflicting offer
-      }
-
-      peer.setRemoteDescription(new RTCSessionDescription(data.sdp)).then(() => {
-        while (iceCandidateQueue.length > 0) {
-          peer.addIceCandidate(iceCandidateQueue.shift());
+    if (isHost) {
+      // Host receives: GUEST_JOINED -> sends OFFER
+      if (data.type === 'GUEST_JOINED') {
+        logStatus('Guest detected! Creating offer...');
+        const peer = initPeerConnection();
+        try {
+          const offer = await peer.createOffer();
+          await peer.setLocalDescription(offer);
+          sendSignal({ type: 'OFFER', sdp: peer.localDescription });
+        } catch (err) {
+          console.error('Host offer error:', err);
         }
-        return peer.createAnswer();
-      }).then((answer) => {
-        return peer.setLocalDescription(answer);
-      }).then(() => {
-        sendSignal({ type: 'ANSWER', sdp: peer.localDescription });
-      }).catch((err) => console.error('Answer creation error:', err));
-    } else if (data.type === 'ANSWER') {
-      logStatus('Completing handshake...');
-      if (rtcPeer && rtcPeer.signalingState === 'have-local-offer') {
-        rtcPeer.setRemoteDescription(new RTCSessionDescription(data.sdp)).then(() => {
+      } else if (data.type === 'ANSWER') {
+        logStatus('Received answer. Linking...');
+        if (rtcPeer && rtcPeer.signalingState === 'have-local-offer') {
+          await rtcPeer.setRemoteDescription(new RTCSessionDescription(data.sdp));
           while (iceCandidateQueue.length > 0) {
-            rtcPeer.addIceCandidate(iceCandidateQueue.shift());
+            await rtcPeer.addIceCandidate(iceCandidateQueue.shift());
           }
-        }).catch((err) => console.error('Remote desc error:', err));
+        }
+      } else if (data.type === 'ICE_CANDIDATE') {
+        applyIceCandidate(data.candidate);
       }
-    } else if (data.type === 'ICE_CANDIDATE') {
-      const candidate = new RTCIceCandidate(data.candidate);
-      if (rtcPeer && rtcPeer.remoteDescription && rtcPeer.remoteDescription.type) {
-        rtcPeer.addIceCandidate(candidate).catch((e) => console.warn('ICE add error:', e));
-      } else {
-        iceCandidateQueue.push(candidate);
+    } else {
+      // Guest receives: OFFER -> sends ANSWER
+      if (data.type === 'OFFER') {
+        logStatus('Received host offer. Creating answer...');
+        const peer = initPeerConnection();
+        try {
+          await peer.setRemoteDescription(new RTCSessionDescription(data.sdp));
+          while (iceCandidateQueue.length > 0) {
+            await peer.addIceCandidate(iceCandidateQueue.shift());
+          }
+          const answer = await peer.createAnswer();
+          await peer.setLocalDescription(answer);
+          sendSignal({ type: 'ANSWER', sdp: peer.localDescription });
+        } catch (err) {
+          console.error('Guest answer error:', err);
+        }
+      } else if (data.type === 'ICE_CANDIDATE') {
+        applyIceCandidate(data.candidate);
       }
+    }
+  }
+
+  function applyIceCandidate(candidateData) {
+    const candidate = new RTCIceCandidate(candidateData);
+    if (rtcPeer && rtcPeer.remoteDescription && rtcPeer.remoteDescription.type) {
+      rtcPeer.addIceCandidate(candidate).catch((e) => console.warn('ICE add error:', e));
+    } else {
+      iceCandidateQueue.push(candidate);
     }
   }
 
@@ -252,7 +251,6 @@
   function bindDataChannel(channel) {
     channel.onopen = () => {
       clearTimeout(pollTimer);
-      clearInterval(handshakeTimer);
 
       updateStatus(true, 'Direct P2P Synced');
       logStatus('Direct P2P Synced (Firewall Bypassed)');
@@ -291,24 +289,25 @@
   }
 
   function startSignaling() {
-    logStatus('Signaling ready. Scan QR with 2nd device!');
+    logStatus(isHost ? 'Signaling ready. Scan QR with 2nd device!' : 'Connecting to Host...');
     updateStatus(false, 'Ready');
 
-    // Heartbeat every 2s until WebRTC data channel opens
-    clearInterval(handshakeTimer);
-    handshakeTimer = setInterval(() => {
-      if (!dataChannel || dataChannel.readyState !== 'open') {
-        sendSignal({ type: 'PING' });
-      } else {
-        clearInterval(handshakeTimer);
-      }
-    }, 2000);
+    // Guest sends handshake ping on launch
+    if (!isHost) {
+      const announceInterval = setInterval(() => {
+        if (!dataChannel || dataChannel.readyState !== 'open') {
+          sendSignal({ type: 'GUEST_JOINED' });
+        } else {
+          clearInterval(announceInterval);
+        }
+      }, 2000);
+      sendSignal({ type: 'GUEST_JOINED' });
+    }
 
-    sendSignal({ type: 'PING' });
-    pollTimer = setTimeout(pollSignaling, 1000);
+    pollTimer = setTimeout(pollSignaling, 500);
   }
 
-  // --- 4. Application Init ---
+  // --- 4. Application Initialization ---
   function initApp() {
     editor = document.getElementById('editor');
     chars = document.getElementById('chars');
@@ -334,18 +333,37 @@
     fileInput = document.getElementById('fileInput');
     filesDeck = document.getElementById('filesDeck');
 
-    activeRoom = window.location.hash.replace('#', '').trim().toLowerCase();
-    if (!activeRoom) {
+    // Parse hash and detect role
+    const rawHash = window.location.hash.replace('#', '').trim().toLowerCase();
+    const isGuestParam = rawHash.includes('role=guest');
+    const cleanRoomCode = rawHash.split('?')[0].replace(/[^a-z0-9]/g, '');
+
+    if (!cleanRoomCode) {
       activeRoom = generateSlug();
+      isHost = true;
       window.history.replaceState(null, '', '#' + activeRoom);
+    } else {
+      activeRoom = cleanRoomCode;
+      isHost = !isGuestParam;
     }
+
     if (roomCodeDisplay) {
-      roomCodeDisplay.textContent = '#' + activeRoom;
+      roomCodeDisplay.textContent = '#' + activeRoom + (isHost ? ' (Host)' : ' (Guest)');
     }
 
     cacheKey = `airtext_draft_${activeRoom}`;
-    // Namespace signaling topic to isolate from previous room runs
-    relayEndpoint = `https://ntfy.sh/airtext_p2p_${activeRoom}`;
+
+    // Split channels: Host sends to A and listens to B; Guest sends to B and listens to A
+    const topicA = `airtext_sig_${activeRoom}_h2g`;
+    const topicB = `airtext_sig_${activeRoom}_g2h`;
+
+    if (isHost) {
+      sendChannelUrl = `https://ntfy.sh/${topicA}`;
+      listenChannelUrl = `https://ntfy.sh/${topicB}`;
+    } else {
+      sendChannelUrl = `https://ntfy.sh/${topicB}`;
+      listenChannelUrl = `https://ntfy.sh/${topicA}`;
+    }
 
     if (editor) {
       editor.value = localStorage.getItem(cacheKey) || '';
@@ -400,7 +418,6 @@
         if (confirm('Start a new room?')) {
           localStorage.removeItem(cacheKey);
           clearTimeout(pollTimer);
-          clearInterval(handshakeTimer);
           window.location.hash = generateSlug();
           window.location.reload();
         }
@@ -411,7 +428,7 @@
       joinBtn.addEventListener('click', () => {
         const code = joinInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
         if (!code) return;
-        window.location.hash = code;
+        window.location.hash = code + '?role=guest';
         window.location.reload();
       });
     }
@@ -442,7 +459,7 @@
       });
     }
 
-    // Reliable Dynamic QR Generator (Works every time clicked)
+    // Dynamic QR Generator (appends ?role=guest to link automatically)
     if (qrBtn && qrModal && qrCanvas) {
       qrBtn.addEventListener('click', () => {
         while (qrCanvas.firstChild) {
