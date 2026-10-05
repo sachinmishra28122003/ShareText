@@ -1,4 +1,3 @@
-
 // --- DOM Elements ---
 const editor = document.getElementById('editor');
 const chars = document.getElementById('chars');
@@ -42,6 +41,8 @@ if (rawHash.includes(':')) {
   const parts = rawHash.split(':');
   activeRoom = parts[0].toLowerCase();
   targetPeerId = parts[1];
+  // CRUCIAL: Clean URL immediately so page refresh never traps device in client mode
+  window.history.replaceState(null, '', `#${activeRoom}`);
 } else if (rawHash) {
   activeRoom = rawHash.toLowerCase();
 } else {
@@ -59,7 +60,7 @@ function updateCharCount() {
   chars.textContent = `${editor.value.length} characters`;
 }
 
-// --- 2. Resilient WebRTC Engine with Reconnection Watchdog ---
+// --- 2. Corporate + Consumer Bulletproof WebRTC Engine ---
 let peer = null;
 let activeConnection = null;
 let myPeerId = '';
@@ -67,20 +68,31 @@ let isRemoteInput = false;
 let pingTimer = null;
 let reconnectTimer = null;
 
+// Enterprise-ready ICE configuration: Includes standard STUN + Port 443 TURNS TCP Fallback
 const peerConfig = {
   debug: 1,
   config: {
+    iceTransportPolicy: 'all',
+    iceCandidatePoolSize: 10,
     iceServers: [
+      // Standard STUN (Fastest for home/mobile data)
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun.cloudflare.com:3478' },
+      
+      // Enterprise TURNS over TLS/TCP on Port 443 (Bypasses AP Isolation & Corporate Firewalls)
       {
-        urls: 'turn:openrelay.metered.ca:80',
+        urls: 'turns:openrelay.metered.ca:443?transport=tcp',
         username: 'openrelay',
         credential: 'openrelay'
       },
       {
-        urls: 'turn:openrelay.metered.ca:443',
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelay',
+        credential: 'openrelay'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:80',
         username: 'openrelay',
         credential: 'openrelay'
       }
@@ -93,7 +105,6 @@ function initP2P() {
     try { peer.destroy(); } catch (e) {}
   }
 
-  // Pure random session identifier to avoid 0.peerjs.com collision dropouts
   const randomSuffix = Math.random().toString(36).substring(2, 9);
   myPeerId = `air_${activeRoom}_${randomSuffix}`;
 
@@ -105,9 +116,8 @@ function initP2P() {
 
     if (targetPeerId) {
       updateStatus(false, 'Connecting...');
-      networkText.textContent = 'Pairing with peer...';
-      const conn = peer.connect(targetPeerId, { reliable: true });
-      bindDataChannel(conn);
+      networkText.textContent = 'Punching firewall to host...';
+      connectToHost(targetPeerId);
     } else {
       updateStatus(false, 'Waiting');
       networkText.textContent = 'Ready. Scan QR with your 2nd device!';
@@ -115,10 +125,8 @@ function initP2P() {
     }
   });
 
-  // Handle "Lost connection to server" shown in your console
   peer.on('disconnected', () => {
     networkText.textContent = 'Signaling blip. Auto-reconnecting...';
-    // Automatically reconnect socket without changing peer identity
     if (!peer.destroyed) {
       reconnectTimer = setTimeout(() => {
         try { peer.reconnect(); } catch (e) {}
@@ -131,29 +139,40 @@ function initP2P() {
   });
 
   peer.on('error', (err) => {
-    console.warn('Peer notice:', err);
+    console.warn('Peer error notice:', err);
     if (err.type === 'peer-unavailable') {
-      networkText.textContent = 'Host offline. Scan fresh QR code.';
+      networkText.textContent = 'Host offline or reset. Re-scan QR code.';
     } else if (err.type === 'network' || err.type === 'server-error') {
-      networkText.textContent = 'Reconnecting to signaling...';
+      networkText.textContent = 'Reconnecting to signaling relay...';
       try { peer.reconnect(); } catch (e) {}
     }
   });
 }
 
+function connectToHost(targetId) {
+  const conn = peer.connect(targetId, {
+    reliable: true
+  });
+  bindDataChannel(conn);
+}
+
 function bindDataChannel(conn) {
   activeConnection = conn;
+
+  networkText.textContent = 'Negotiating WebRTC ICE candidates...';
 
   conn.on('open', () => {
     updateStatus(true, 'Synced');
     networkText.textContent = 'Direct WebRTC P2P Active';
     peerLabel.textContent = '1 device connected';
-    showToast('Device connected!');
+    showToast('Device linked successfully!');
 
+    // Immediate state synchronization
     if (editor.value) {
       conn.send({ type: 'SYNC_TEXT', text: editor.value });
     }
 
+    // Keep-alive heartbeat (ensures mobile OS doesn't sleep the socket)
     if (!pingTimer) {
       pingTimer = setInterval(() => {
         if (activeConnection && activeConnection.open) {
@@ -182,14 +201,14 @@ function bindDataChannel(conn) {
 
   conn.on('close', () => {
     updateStatus(false, 'Disconnected');
-    networkText.textContent = 'Peer disconnected. Waiting...';
+    networkText.textContent = 'Device left. Waiting for new connection...';
     peerLabel.textContent = '0 devices connected';
     activeConnection = null;
   });
 
   conn.on('error', (err) => {
-    console.warn('Channel error:', err);
-    updateStatus(false, 'Connection error');
+    console.warn('DataChannel error:', err);
+    updateStatus(false, 'Relay error');
     peerLabel.textContent = '0 devices connected';
     activeConnection = null;
   });
@@ -224,7 +243,7 @@ editor.addEventListener('input', () => {
   }, 80);
 });
 
-// --- 4. File Sharing ---
+// --- 4. File Sharing Implementation ---
 sendFileBtn.addEventListener('click', () => {
   if (!activeConnection || !activeConnection.open) {
     showToast('Wait until devices are linked before sending files');
@@ -350,7 +369,22 @@ qrModal.addEventListener('click', (e) => {
   }
 });
 
-// --- 6. Theme Toggle & Toast Notifications ---
+// --- 6. In-Page Hash Change Listener ---
+// Handles Android WebView or SPA hash updates without full page reloads
+window.addEventListener('hashchange', () => {
+  const updatedHash = window.location.hash.replace('#', '').trim();
+  if (updatedHash.includes(':')) {
+    const parts = updatedHash.split(':');
+    const newTarget = parts[1];
+    window.history.replaceState(null, '', `#${parts[0]}`);
+    if (newTarget && newTarget !== myPeerId) {
+      networkText.textContent = 'Pairing with scanned host...';
+      connectToHost(newTarget);
+    }
+  }
+});
+
+// --- 7. Theme Toggle & Toast Notifications ---
 const savedTheme = localStorage.getItem('airtext_theme') || 'dark';
 document.documentElement.setAttribute('data-theme', savedTheme);
 themeBtn.textContent = savedTheme === 'dark' ? '🌙' : '☀';
@@ -379,3 +413,4 @@ window.addEventListener('beforeunload', () => {
 
 // Start engine
 initP2P();
+  
