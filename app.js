@@ -1,4 +1,4 @@
-// --- AirText: 100% Native WebRTC via HTTPS Long-Polling (No External Libraries) ---
+// --- AirText: Rate-Limit Protected Native WebRTC Signaling ---
 (function () {
   'use strict';
 
@@ -12,9 +12,11 @@
   let dataChannel = null;
   let isRemoteInput = false;
   let signalingTimer = null;
-  let handshakeTimer = null;
+  let isPolling = false;
   let lastSeenTimestamp = 0;
   let iceCandidateQueue = [];
+  let pollInterval = 2500;
+  let handshakeCounter = 0;
 
   const myPeerId = 'peer_' + Math.random().toString(36).substring(2, 9);
   let activeRoom = '';
@@ -30,9 +32,9 @@
   };
 
   function generateSlug() {
-    const c = 'abcdefghjkmnpqrstuvwxyz23456789';
+    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
     let s = '';
-    for (let i = 0; i < 6; i++) s += c[Math.floor(Math.random() * c.length)];
+    for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
     return s;
   }
 
@@ -89,11 +91,12 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Pure HTTPS Signaling ---
+  // --- 1. Rate-Limit Resilient Signaling ---
   async function sendSignal(payload) {
     try {
       await fetch(`https://ntfy.sh/${topic}`, {
         method: 'POST',
+        headers: { 'Title': 'AirText' },
         body: JSON.stringify(payload)
       });
     } catch (err) {
@@ -103,11 +106,25 @@
 
   async function pollSignaling() {
     if (dataChannel && dataChannel.readyState === 'open') return;
+    if (isPolling) return;
+    isPolling = true;
 
     try {
-      const url = `https://ntfy.sh/${topic}/json?poll=1&since=${lastSeenTimestamp || '10s'}`;
-      const res = await fetch(url);
-      if (res.ok) {
+      // Periodic Handshake ping synchronized with poll to eliminate concurrent timers
+      handshakeCounter++;
+      if (handshakeCounter % 2 === 0) {
+        sendSignal({ type: 'PING_PEER', from: myPeerId });
+      }
+
+      const sinceParam = lastSeenTimestamp > 0 ? lastSeenTimestamp : '30s';
+      const res = await fetch(`https://ntfy.sh/${topic}/json?poll=1&since=${sinceParam}`);
+
+      if (res.status === 429) {
+        // Corporate proxy throttle detected: throttle back to 6s
+        pollInterval = 6000;
+        logStatus('Proxy throttle detected. Backing off...');
+      } else if (res.ok) {
+        pollInterval = 2500;
         const text = await res.text();
         const lines = text.trim().split('\n');
 
@@ -126,11 +143,13 @@
         }
       }
     } catch (err) {
-      console.warn('Signaling poll check failed:', err);
+      console.warn('Signaling poll error:', err);
+    } finally {
+      isPolling = false;
     }
 
     if (!dataChannel || dataChannel.readyState !== 'open') {
-      signalingTimer = setTimeout(pollSignaling, 1000);
+      signalingTimer = setTimeout(pollSignaling, pollInterval);
     }
   }
 
@@ -138,21 +157,14 @@
     logStatus('Signaling ready. Scan QR with 2nd device!');
     updateStatus(false, 'Ready');
 
-    pollSignaling();
-
-    clearInterval(handshakeTimer);
-    handshakeTimer = setInterval(() => {
-      if (!dataChannel || dataChannel.readyState !== 'open') {
-        sendSignal({ type: 'PING_PEER', from: myPeerId });
-      } else {
-        clearInterval(handshakeTimer);
-      }
-    }, 1500);
-
+    // Initial broadcast
     sendSignal({ type: 'PING_PEER', from: myPeerId });
+
+    // Single polling pipeline
+    signalingTimer = setTimeout(pollSignaling, 1000);
   }
 
-  // --- 2. Standard Native WebRTC Connection ---
+  // --- 2. Standard WebRTC Connection ---
   function getOrCreatePeerConnection(isInitiator) {
     if (rtcPeer) return rtcPeer;
 
@@ -230,7 +242,6 @@
   function bindDataChannel(channel) {
     channel.onopen = () => {
       clearTimeout(signalingTimer);
-      clearInterval(handshakeTimer);
 
       updateStatus(true, 'Direct P2P Synced');
       logStatus('Direct P2P Synced (Firewall Bypassed)');
@@ -303,7 +314,8 @@
       roomCodeDisplay.textContent = '#' + activeRoom;
     }
 
-    topic = `airtext_sig_${activeRoom}`;
+    // High-entropy prefix prevents collision with other ntfy rooms on public gateways
+    topic = `airtext_rel_${activeRoom}_${Math.random().toString(36).substring(2, 6)}`;
     cacheKey = `airtext_draft_${activeRoom}`;
 
     if (editor) {
@@ -359,7 +371,6 @@
         if (confirm('Start a new room?')) {
           localStorage.removeItem(cacheKey);
           clearTimeout(signalingTimer);
-          clearInterval(handshakeTimer);
           window.location.hash = generateSlug();
           window.location.reload();
         }
@@ -404,15 +415,23 @@
     if (qrBtn && qrModal && qrCanvas) {
       qrBtn.addEventListener('click', () => {
         qrCanvas.innerHTML = '';
+        const shareUrl = getFullShareUrl();
         if (typeof window.QRCode !== 'undefined') {
           new window.QRCode(qrCanvas, {
-            text: getFullShareUrl(),
+            text: shareUrl,
             width: 180,
             height: 180,
             colorDark: '#0a0b0e',
             colorLight: '#ffffff',
             correctLevel: window.QRCode.CorrectLevel.M
           });
+        } else {
+          // Zero-dependency fallback rendering
+          const qrImg = document.createElement('img');
+          qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(shareUrl)}`;
+          qrImg.alt = 'Pair QR';
+          qrImg.style.borderRadius = '8px';
+          qrCanvas.appendChild(qrImg);
         }
         qrModal.classList.add('open');
       });
@@ -448,9 +467,3 @@
     initApp();
   }
 })();
-
-
-
-
-
-
