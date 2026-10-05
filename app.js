@@ -19,8 +19,13 @@
   let brokerIndex = 0;
 
   const brokers = [
-    { host: 'broker.emqx.io', port: 8084, path: '/mqtt' },
-    { host: 'broker.hivemq.com', port: 8884, path: '/mqtt' }
+    // Standard Port 443 TLS (Bypasses 99% of enterprise firewalls)
+    { host: 'broker.emqx.io', port: 443, path: '/mqtt' },
+    // Alternate 443 TLS Mosquitto mirror
+    { host: 'test.mosquitto.org', port: 8081, path: '/mqtt' },
+    // Standard 8084 / 8884 fallback if on mobile hotspot
+    { host: 'broker.hivemq.com', port: 8884, path: '/mqtt' },
+    { host: 'broker.emqx.io', port: 8084, path: '/mqtt' }
   ];
 
   const myPeerId = 'peer_' + Math.random().toString(36).substring(2, 9);
