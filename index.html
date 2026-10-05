@@ -4,12 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AirText — Instant P2P Sync & Transfer</title>
-  <link rel="stylesheet" href="./style.css?v=3.1.0" />
-
-  <!-- Only Paho MQTT and QRCode are needed (No PeerJS) -->
-  <script src="./paho-mqtt.min.js?v=9"></script>
-<script src="./qrcode.min.js?v=9"></script>
-<script src="./app.js?v=9"></script>
+  <link rel="stylesheet" href="./style.css?v=9" />
 </head>
 <body>
 
@@ -83,7 +78,9 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="./app.js?v=3.1.0"></script>
+  <!-- SCRIPTS PLACED AT THE BOTTOM IN CORRECT ORDER (ONLY ONE app.js) -->
+  <script src="./paho-mqtt.min.js?v=9"></script>
+  <script src="./qrcode.min.js?v=9"></script>
+  <script src="./app.js?v=9"></script>
 </body>
 </html>
-
