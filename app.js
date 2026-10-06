@@ -1,4 +1,4 @@
-// --- AirText: Zero-Dependency Corporate WebRTC (Self-Cleaning Firebase REST) ---
+// --- AirText: Enterprise WebRTC Engine (Anti-Loop & Corporate NAT Traversal) ---
 (function () {
   'use strict';
 
@@ -15,28 +15,34 @@
   let guestAnnounceTimer = null;
   let isPolling = false;
   let lastHandledMessageId = null;
+  let isNegotiating = false;
 
   let isHost = true;
   let activeRoom = '';
   let cacheKey = '';
 
-  // Sanitized Firebase URL (guarantees no trailing slash)
   const RAW_FIREBASE_URL = 'https://airtext-relay-default-rtdb.firebaseio.com';
   const FIREBASE_BASE = RAW_FIREBASE_URL.replace(/\/+$/, '');
 
-  // Enterprise TURN servers over Port 443 TCP to punch through corporate symmetric firewalls
+  // Enterprise TURN servers configured for port 443 TCP/TLS
   const rtcConfig = {
+    iceCandidatePoolSize: 10,
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun.cloudflare.com:3478' },
       {
-        urls: 'turns:openrelay.metered.ca:443?transport=tcp',
+        urls: [
+          'turn:openrelay.metered.ca:443?transport=tcp',
+          'turn:openrelay.metered.ca:80?transport=tcp'
+        ],
         username: 'openrelay',
         credential: 'openrelay'
       },
       {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        urls: [
+          'turns:openrelay.metered.ca:443?transport=tcp'
+        ],
         username: 'openrelay',
         credential: 'openrelay'
       }
@@ -103,7 +109,7 @@
     filesDeck.prepend(card);
   }
 
-  // Gather STUN/TURN candidates directly into the initial SDP description
+  // Candidate gathering helper with timeout safeguard
   function waitForIceGathering(pc) {
     return new Promise((resolve) => {
       if (pc.iceGatheringState === 'complete') {
@@ -119,12 +125,12 @@
         setTimeout(() => {
           pc.removeEventListener('icegatheringstatechange', checkState);
           resolve();
-        }, 1200);
+        }, 2000);
       }
     });
   }
 
-  // --- 1. Cloud-Optimized Firebase REST Signaling ---
+  // --- 1. Firebase Signaling ---
   async function sendSignal(payload) {
     const targetPath = isHost ? 'h2g' : 'g2h';
     const packet = {
@@ -158,28 +164,23 @@
         }
       }
     } catch (err) {
-      // Suppress temporary polling glitches
+      // Ignore temporary polling network drops
     } finally {
       isPolling = false;
     }
 
     if (!dataChannel || dataChannel.readyState !== 'open') {
       clearTimeout(pollTimer);
-      pollTimer = setTimeout(pollSignaling, 1800);
+      pollTimer = setTimeout(pollSignaling, 1500);
     }
   }
 
-  // Guaranteed Room Purge: Clears cloud node on sync, tab close, or room reset
   function cleanupFirebaseRoom() {
     if (!activeRoom || !FIREBASE_BASE) return;
     const cleanupUrl = `${FIREBASE_BASE}/rooms/${activeRoom}.json`;
-
     try {
-      // Using keepalive allows the DELETE request to outlive tab closure
       fetch(cleanupUrl, { method: 'DELETE', keepalive: true }).catch(() => {});
     } catch (e) {}
-
-    console.log(`[AirText] Room #${activeRoom} purge dispatched.`);
   }
 
   // --- 2. Deterministic WebRTC Setup ---
@@ -189,13 +190,22 @@
     rtcPeer = new RTCPeerConnection(rtcConfig);
 
     rtcPeer.oniceconnectionstatechange = () => {
-      if (rtcPeer.iceConnectionState === 'connected' || rtcPeer.iceConnectionState === 'completed') {
+      const state = rtcPeer.iceConnectionState;
+      logStatus(`ICE State: ${state}`);
+      if (state === 'connected' || state === 'completed') {
         logStatus('Direct P2P Synced');
+      } else if (state === 'failed') {
+        logStatus('Corporate firewall blocking UDP/TCP. Retrying...');
+        if (rtcPeer.restartIce) {
+          rtcPeer.restartIce();
+        }
       }
     };
 
     if (isHost) {
-      dataChannel = rtcPeer.createDataChannel('airtext_channel', { reliable: true });
+      dataChannel = rtcPeer.createDataChannel('airtext_channel', {
+        ordered: true
+      });
       bindDataChannel(dataChannel);
     } else {
       rtcPeer.ondatachannel = (e) => {
@@ -213,15 +223,22 @@
 
     if (isHost) {
       if (data.type === 'GUEST_JOINED') {
+        // Prevent repeated negotiation if connection is already in progress
+        if (isNegotiating || (rtcPeer && rtcPeer.signalingState !== 'stable')) {
+          return;
+        }
+        isNegotiating = true;
         logStatus('Guest detected! Packaging complete Offer...');
         const peer = initPeerConnection();
+
         try {
           const offer = await peer.createOffer();
           await peer.setLocalDescription(offer);
           await waitForIceGathering(peer);
           await sendSignal({ type: 'OFFER', sdp: peer.localDescription.sdp });
         } catch (err) {
-          console.error('Host offer creation error:', err);
+          console.error('Host offer error:', err);
+          isNegotiating = false;
         }
       } else if (data.type === 'ANSWER') {
         logStatus('Answer received! Finalizing connection...');
@@ -231,8 +248,11 @@
       }
     } else {
       if (data.type === 'OFFER') {
+        // Stop guest ping interval immediately once offer arrives
+        clearInterval(guestAnnounceTimer);
         logStatus('Host offer received! Packaging complete Answer...');
         const peer = initPeerConnection();
+
         try {
           await peer.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }));
           const answer = await peer.createAnswer();
@@ -240,19 +260,19 @@
           await waitForIceGathering(peer);
           await sendSignal({ type: 'ANSWER', sdp: peer.localDescription.sdp });
         } catch (err) {
-          console.error('Guest answer creation error:', err);
+          console.error('Guest answer error:', err);
         }
       }
     }
   }
 
-  // --- 3. DataChannel & Instant Self-Cleanup ---
+  // --- 3. DataChannel Setup ---
   function bindDataChannel(channel) {
     channel.onopen = () => {
       clearTimeout(pollTimer);
       clearInterval(guestAnnounceTimer);
+      isNegotiating = false;
 
-      // Handshake succeeded: Immediately delete signaling data from Firebase
       cleanupFirebaseRoom();
 
       updateStatus(true, 'Direct P2P Synced');
@@ -280,7 +300,7 @@
           showToast(`Received ${data.name}`);
         }
       } catch (err) {
-        console.warn('Channel error:', err);
+        console.warn('Channel parse error:', err);
       }
     };
 
@@ -288,6 +308,7 @@
       updateStatus(false, 'Disconnected');
       if (peerLabel) peerLabel.textContent = '0 devices connected';
       logStatus('Peer disconnected. Refresh page to pair again.');
+      isNegotiating = false;
     };
   }
 
@@ -298,7 +319,6 @@
     clearTimeout(pollTimer);
 
     if (isHost) {
-      // Seed room node with creation time so poll GET requests never return 404
       try {
         await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}.json`, {
           method: 'PUT',
@@ -306,17 +326,16 @@
         });
       } catch (e) {}
     } else {
-      // Guest retries handshake announcement every 2s until P2P channel connects
+      // Announce guest presence, stopping as soon as the host provides an offer
+      sendSignal({ type: 'GUEST_JOINED' });
       clearInterval(guestAnnounceTimer);
       guestAnnounceTimer = setInterval(() => {
-        if (!dataChannel || dataChannel.readyState !== 'open') {
+        if (!rtcPeer || rtcPeer.signalingState === 'stable') {
           sendSignal({ type: 'GUEST_JOINED' });
         } else {
           clearInterval(guestAnnounceTimer);
         }
-      }, 2000);
-
-      sendSignal({ type: 'GUEST_JOINED' });
+      }, 2500);
     }
 
     pollTimer = setTimeout(pollSignaling, 1000);
@@ -376,7 +395,6 @@
         updateCharCount();
         localStorage.setItem(cacheKey, editor.value);
 
-        // Keystrokes stream exclusively through P2P DataChannel (0 cloud bytes)
         if (isRemoteInput || !dataChannel || dataChannel.readyState !== 'open') return;
 
         clearTimeout(typingTimer);
@@ -407,7 +425,6 @@
             size: formatFileSize(file.size),
             data: reader.result
           };
-          // File transfers stream exclusively through P2P DataChannel (0 cloud bytes)
           dataChannel.send(JSON.stringify(payload));
           renderFileCard(file.name, payload.size, reader.result, true);
           showToast(`Sent ${file.name}`);
@@ -504,7 +521,6 @@
       });
     }
 
-    // Attach lifecycle exit purges
     window.addEventListener('pagehide', cleanupFirebaseRoom);
     window.addEventListener('beforeunload', cleanupFirebaseRoom);
 
@@ -517,3 +533,4 @@
     initApp();
   }
 })();
+        
