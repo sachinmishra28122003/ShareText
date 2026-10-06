@@ -1,43 +1,35 @@
-// --- AirText: Zero-Dependency Corporate WebRTC (Trickle ICE over Firebase) ---
+// --- AirText: Zero-Friction Enterprise Cloud Relay (Firebase REST) ---
 (function () {
   'use strict';
 
-  // Elements
+  // UI Elements
   let editor, chars, roomCodeDisplay, networkText, flash, statusDot, statusLabel;
   let peerLabel, clearBtn, copyBtn, copyLinkBtn, resetRoomBtn, joinInput, joinBtn;
   let qrBtn, qrModal, closeModalBtn, qrCanvas, themeBtn, toast, sendFileBtn, fileInput, filesDeck;
 
-  // WebRTC & Session State
-  let rtcPeer = null;
-  let dataChannel = null;
+  // Session State
   let isRemoteInput = false;
   let pollTimer = null;
+  let heartbeatTimer = null;
   let isPolling = false;
-  let isNegotiating = false;
-  const processedMessageIds = new Set();
-  const remoteCandidatesQueue = [];
+  let lastReceivedMid = null;
 
   let isHost = true;
   let activeRoom = '';
   let cacheKey = '';
+  const myClientId = 'cli_' + Math.random().toString(36).substring(2, 9);
 
+  // ⚠️ Sanitize base URL (guaranteed no trailing slash)
   const RAW_FIREBASE_URL = 'https://airtext-relay-default-rtdb.firebaseio.com';
   const FIREBASE_BASE = RAW_FIREBASE_URL.replace(/\/+$/, '');
 
-  // Standard Google STUN (Used by ShareDrop)
-  const rtcConfig = {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' }
-    ]
-  };
-
   function generateSlug() {
-    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
-    let s = '';
-    for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
-    return s;
+    const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+    let slug = '';
+    for (let i = 0; i < 6; i++) {
+      slug += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    return slug;
   }
 
   function getFullShareUrl() {
@@ -93,224 +85,112 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Realtime Trickle Signaling via Firebase ---
-  async function pushSignal(payload) {
-    const targetPath = isHost ? 'h2g_signals' : 'g2h_signals';
+  // --- 1. Cloud Storage Dispatchers & Listeners ---
+  async function publishPayload(payload) {
     const packet = {
       mid: 'm_' + Math.random().toString(36).substring(2, 9),
+      senderId: myClientId,
       time: Date.now(),
       ...payload
     };
+    lastReceivedMid = packet.mid;
+
     try {
-      await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/${targetPath}.json`, {
-        method: 'POST',
+      // PUT overwrites the sync node in place to keep storage near zero
+      await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/sync.json`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(packet)
       });
-    } catch (e) {
-      console.warn('Signal push error:', e);
+    } catch (err) {
+      console.warn('Publish error:', err);
     }
   }
 
-  async function pollSignaling() {
-    if (dataChannel && dataChannel.readyState === 'open') return;
+  async function pollCloudUpdates() {
     if (isPolling) return;
     isPolling = true;
 
-    const listenPath = isHost ? 'g2h_signals' : 'h2g_signals';
     try {
-      const res = await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/${listenPath}.json?t=${Date.now()}`);
+      // Cache-buster query prevents proxy caching
+      const res = await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/sync.json?t=${Date.now()}`);
       if (res.ok) {
         const data = await res.json();
-        if (data && typeof data === 'object') {
-          for (const key of Object.keys(data)) {
-            const entry = data[key];
-            if (entry && entry.mid && !processedMessageIds.has(entry.mid)) {
-              processedMessageIds.add(entry.mid);
-              handleSignalingMessage(entry);
+        if (data && data.mid && data.mid !== lastReceivedMid) {
+          lastReceivedMid = data.mid;
+
+          // Process payload only if sent by the other device
+          if (data.senderId !== myClientId) {
+            if (data.type === 'SYNC_TEXT' && editor) {
+              isRemoteInput = true;
+              editor.value = data.text;
+              localStorage.setItem(cacheKey, data.text);
+              updateCharCount();
+              triggerPulse();
+              isRemoteInput = false;
+            } else if (data.type === 'SYNC_FILE') {
+              renderFileCard(data.name, data.size, data.data, false);
+              showToast(`Received ${data.name}`);
             }
           }
         }
       }
+
+      // Check peers presence
+      const presenceRes = await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/presence.json?t=${Date.now()}`);
+      if (presenceRes.ok) {
+        const presence = await presenceRes.json();
+        if (presence && typeof presence === 'object') {
+          const now = Date.now();
+          // Consider a peer active if they posted a heartbeat in the last 6 seconds
+          const activePeers = Object.values(presence).filter(p => now - p.lastSeen < 6000);
+
+          if (activePeers.length > 1) {
+            updateStatus(true, 'Cloud Synced (Firewall Bypassed)');
+            logStatus('Connected via Secure Cloud Relay');
+            if (peerLabel) peerLabel.textContent = `${activePeers.length - 1} peer connected`;
+          } else {
+            updateStatus(false, 'Waiting for peer...');
+            logStatus('Room active. Scan QR on 2nd device!');
+            if (peerLabel) peerLabel.textContent = '0 peers connected';
+          }
+        }
+      }
     } catch (err) {
-      // Suppress network jitter logs while awaiting peer
+      // Suppress network jitter logs while polling
     } finally {
       isPolling = false;
     }
 
-    if (!dataChannel || dataChannel.readyState !== 'open') {
-      clearTimeout(pollTimer);
-      pollTimer = setTimeout(pollSignaling, 1000);
-    }
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(pollCloudUpdates, 1200);
   }
 
-  function cleanupFirebaseRoom() {
-    if (!activeRoom || !FIREBASE_BASE) return;
+  async function sendHeartbeat() {
     try {
-      fetch(`${FIREBASE_BASE}/rooms/${activeRoom}.json`, { method: 'DELETE', keepalive: true }).catch(() => {});
+      await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/presence/${myClientId}.json`, {
+        method: 'PUT',
+        body: JSON.stringify({ lastSeen: Date.now(), isHost: isHost })
+      });
     } catch (e) {}
   }
 
-  // --- 2. Deterministic WebRTC Setup (Trickle ICE) ---
-  function initPeerConnection() {
-    if (rtcPeer) return rtcPeer;
+  // Complete cleanup: Purge this room entirely from Firebase
+  function cleanupRoomData() {
+    if (!activeRoom || !FIREBASE_BASE) return;
+    const roomUrl = `${FIREBASE_BASE}/rooms/${activeRoom}.json`;
 
-    rtcPeer = new RTCPeerConnection(rtcConfig);
+    try {
+      fetch(roomUrl, {
+        method: 'DELETE',
+        keepalive: true
+      }).catch(() => {});
+    } catch (e) {}
 
-    // Stream ICE candidates individually as soon as local network interfaces discover them
-    rtcPeer.onicecandidate = (e) => {
-      if (e.candidate) {
-        pushSignal({ type: 'CANDIDATE', candidate: e.candidate.toJSON() });
-      }
-    };
-
-    rtcPeer.oniceconnectionstatechange = () => {
-      const state = rtcPeer.iceConnectionState;
-      logStatus(`ICE State: ${state}`);
-      if (state === 'connected' || state === 'completed') {
-        logStatus('Direct P2P Synced');
-      }
-    };
-
-    if (isHost) {
-      dataChannel = rtcPeer.createDataChannel('airtext_channel');
-      bindDataChannel(dataChannel);
-    } else {
-      rtcPeer.ondatachannel = (e) => {
-        logStatus('Data link opened!');
-        dataChannel = e.channel;
-        bindDataChannel(dataChannel);
-      };
-    }
-
-    return rtcPeer;
+    console.log(`[AirText] Dispatched cloud purge for room #${activeRoom}`);
   }
 
-  async function handleSignalingMessage(data) {
-    if (!data || !data.type) return;
-
-    if (isHost) {
-      if (data.type === 'GUEST_JOINED') {
-        if (isNegotiating) return;
-        isNegotiating = true;
-
-        logStatus('Guest detected! Creating offer...');
-        const peer = initPeerConnection();
-        try {
-          const offer = await peer.createOffer();
-          await peer.setLocalDescription(offer);
-          await pushSignal({ type: 'OFFER', sdp: offer.sdp });
-        } catch (err) {
-          console.error('Host offer error:', err);
-          isNegotiating = false;
-        }
-      } else if (data.type === 'ANSWER') {
-        logStatus('Answer received! Connecting...');
-        if (rtcPeer && rtcPeer.signalingState === 'have-local-offer') {
-          await rtcPeer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
-          drainCandidateQueue();
-        }
-      } else if (data.type === 'CANDIDATE') {
-        applyOrQueueCandidate(data.candidate);
-      }
-    } else {
-      if (data.type === 'OFFER') {
-        logStatus('Host offer received! Generating answer...');
-        const peer = initPeerConnection();
-        try {
-          await peer.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }));
-          drainCandidateQueue();
-          const answer = await peer.createAnswer();
-          await peer.setLocalDescription(answer);
-          await pushSignal({ type: 'ANSWER', sdp: answer.sdp });
-        } catch (err) {
-          console.error('Guest answer error:', err);
-        }
-      } else if (data.type === 'CANDIDATE') {
-        applyOrQueueCandidate(data.candidate);
-      }
-    }
-  }
-
-  function applyOrQueueCandidate(candidateObj) {
-    const candidate = new RTCIceCandidate(candidateObj);
-    if (rtcPeer && rtcPeer.remoteDescription && rtcPeer.remoteDescription.type) {
-      rtcPeer.addIceCandidate(candidate).catch((e) => console.warn('ICE add error:', e));
-    } else {
-      remoteCandidatesQueue.push(candidate);
-    }
-  }
-
-  function drainCandidateQueue() {
-    while (remoteCandidatesQueue.length > 0 && rtcPeer && rtcPeer.remoteDescription) {
-      const cand = remoteCandidatesQueue.shift();
-      rtcPeer.addIceCandidate(cand).catch(() => {});
-    }
-  }
-
-  // --- 3. DataChannel & Self-Cleanup ---
-  function bindDataChannel(channel) {
-    channel.onopen = () => {
-      clearTimeout(pollTimer);
-      cleanupFirebaseRoom();
-
-      updateStatus(true, 'Direct P2P Synced');
-      logStatus('Direct P2P Synced (ShareDrop Engine)');
-      if (peerLabel) peerLabel.textContent = '1 device connected';
-      showToast('Device connected!');
-
-      if (editor && editor.value) {
-        channel.send(JSON.stringify({ type: 'SYNC_TEXT', text: editor.value }));
-      }
-    };
-
-    channel.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.type === 'SYNC_TEXT' && editor) {
-          isRemoteInput = true;
-          editor.value = data.text;
-          localStorage.setItem(cacheKey, data.text);
-          updateCharCount();
-          triggerPulse();
-          isRemoteInput = false;
-        } else if (data.type === 'SYNC_FILE') {
-          renderFileCard(data.name, data.size, data.data, false);
-          showToast(`Received ${data.name}`);
-        }
-      } catch (err) {
-        console.warn('Channel parse error:', err);
-      }
-    };
-
-    channel.onclose = () => {
-      updateStatus(false, 'Disconnected');
-      if (peerLabel) peerLabel.textContent = '0 devices connected';
-      logStatus('Peer disconnected. Refresh page to pair again.');
-      isNegotiating = false;
-    };
-  }
-
-  async function startSignaling() {
-    logStatus(isHost ? 'Signaling ready. Scan QR with 2nd device!' : 'Connecting to Host...');
-    updateStatus(false, 'Ready');
-
-    clearTimeout(pollTimer);
-
-    if (isHost) {
-      try {
-        await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}.json`, {
-          method: 'PUT',
-          body: JSON.stringify({ created: Date.now() })
-        });
-      } catch (e) {}
-    } else {
-      pushSignal({ type: 'GUEST_JOINED' });
-    }
-
-    pollTimer = setTimeout(pollSignaling, 500);
-  }
-
-  // --- 4. Application Initialization ---
+  // --- 2. Application Initialization ---
   function initApp() {
     editor = document.getElementById('editor');
     chars = document.getElementById('chars');
@@ -364,27 +244,29 @@
         updateCharCount();
         localStorage.setItem(cacheKey, editor.value);
 
-        if (isRemoteInput || !dataChannel || dataChannel.readyState !== 'open') return;
+        if (isRemoteInput) return;
 
         clearTimeout(typingTimer);
         typingTimer = setTimeout(() => {
-          dataChannel.send(JSON.stringify({ type: 'SYNC_TEXT', text: editor.value }));
-        }, 80);
+          publishPayload({ type: 'SYNC_TEXT', text: editor.value });
+        }, 100);
       });
     }
 
     if (sendFileBtn && fileInput) {
       sendFileBtn.addEventListener('click', () => {
-        if (!dataChannel || dataChannel.readyState !== 'open') {
-          showToast('Wait until devices are linked before sending files');
-          return;
-        }
         fileInput.click();
       });
 
       fileInput.addEventListener('change', () => {
         const file = fileInput.files[0];
         if (!file) return;
+
+        if (file.size > 8 * 1024 * 1024) {
+          showToast('File too large (Max 8MB for cloud relay)');
+          fileInput.value = '';
+          return;
+        }
 
         const reader = new FileReader();
         reader.onload = () => {
@@ -394,7 +276,7 @@
             size: formatFileSize(file.size),
             data: reader.result
           };
-          dataChannel.send(JSON.stringify(payload));
+          publishPayload(payload);
           renderFileCard(file.name, payload.size, reader.result, true);
           showToast(`Sent ${file.name}`);
         };
@@ -405,10 +287,11 @@
 
     if (resetRoomBtn) {
       resetRoomBtn.addEventListener('click', () => {
-        if (confirm('Start a new room?')) {
-          cleanupFirebaseRoom();
+        if (confirm('Start a new room? This will purge all cloud data for this room.')) {
+          cleanupRoomData();
           localStorage.removeItem(cacheKey);
           clearTimeout(pollTimer);
+          clearInterval(heartbeatTimer);
           window.location.hash = '';
           window.location.reload();
         }
@@ -437,9 +320,7 @@
         if (editor) editor.value = '';
         updateCharCount();
         localStorage.removeItem(cacheKey);
-        if (dataChannel && dataChannel.readyState === 'open') {
-          dataChannel.send(JSON.stringify({ type: 'SYNC_TEXT', text: '' }));
-        }
+        publishPayload({ type: 'SYNC_TEXT', text: '' });
       });
     }
 
@@ -489,10 +370,14 @@
       });
     }
 
-    window.addEventListener('pagehide', cleanupFirebaseRoom);
-    window.addEventListener('beforeunload', cleanupFirebaseRoom);
+    // Attach lifecycle exit purges (clean Firebase when closing tab/navigating away)
+    window.addEventListener('pagehide', cleanupRoomData);
+    window.addEventListener('beforeunload', cleanupRoomData);
 
-    startSignaling();
+    // Initial setup: start heartbeat and update poller
+    sendHeartbeat();
+    heartbeatTimer = setInterval(sendHeartbeat, 3000);
+    pollCloudUpdates();
   }
 
   if (document.readyState === 'loading') {
@@ -501,6 +386,7 @@
     initApp();
   }
 })();
+
  
               
         
