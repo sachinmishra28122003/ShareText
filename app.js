@@ -1,4 +1,4 @@
-// --- AirText: Zero-Friction Enterprise Cloud Relay (Firebase REST) ---
+// --- AirText: Enterprise Cloud Relay Engine (Zero-Lag Firebase REST) ---
 (function () {
   'use strict';
 
@@ -13,13 +13,14 @@
   let heartbeatTimer = null;
   let isPolling = false;
   let lastReceivedMid = null;
+  let currentConnectionState = null;
 
   let isHost = true;
   let activeRoom = '';
   let cacheKey = '';
   const myClientId = 'cli_' + Math.random().toString(36).substring(2, 9);
 
-  // ⚠️ Sanitize base URL (guaranteed no trailing slash)
+  // Sanitized Firebase Endpoint (No trailing slash)
   const RAW_FIREBASE_URL = 'https://airtext-relay-default-rtdb.firebaseio.com';
   const FIREBASE_BASE = RAW_FIREBASE_URL.replace(/\/+$/, '');
 
@@ -85,7 +86,7 @@
     filesDeck.prepend(card);
   }
 
-  // --- 1. Cloud Storage Dispatchers & Listeners ---
+  // --- 1. Cloud Dispatcher & Polling ---
   async function publishPayload(payload) {
     const packet = {
       mid: 'm_' + Math.random().toString(36).substring(2, 9),
@@ -96,7 +97,7 @@
     lastReceivedMid = packet.mid;
 
     try {
-      // PUT overwrites the sync node in place to keep storage near zero
+      // PUT overwrites the sync node in place (consumes virtually 0 cloud storage)
       await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/sync.json`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -107,19 +108,31 @@
     }
   }
 
+  async function sendHeartbeat() {
+    try {
+      await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/presence/${myClientId}.json`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lastSeen: Date.now(),
+          isHost: isHost
+        })
+      });
+    } catch (e) {}
+  }
+
   async function pollCloudUpdates() {
     if (isPolling) return;
     isPolling = true;
 
     try {
-      // Cache-buster query prevents proxy caching
-      const res = await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/sync.json?t=${Date.now()}`);
-      if (res.ok) {
-        const data = await res.json();
+      // 1. Fetch live text or file changes
+      const syncRes = await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/sync.json?t=${Date.now()}`);
+      if (syncRes.ok) {
+        const data = await syncRes.json();
         if (data && data.mid && data.mid !== lastReceivedMid) {
           lastReceivedMid = data.mid;
 
-          // Process payload only if sent by the other device
           if (data.senderId !== myClientId) {
             if (data.type === 'SYNC_TEXT' && editor) {
               isRemoteInput = true;
@@ -136,46 +149,42 @@
         }
       }
 
-      // Check peers presence
+      // 2. Fetch presence (Peer handshake check)
       const presenceRes = await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/presence.json?t=${Date.now()}`);
       if (presenceRes.ok) {
         const presence = await presenceRes.json();
         if (presence && typeof presence === 'object') {
-          const now = Date.now();
-          // Consider a peer active if they posted a heartbeat in the last 6 seconds
-          const activePeers = Object.values(presence).filter(p => now - p.lastSeen < 6000);
-
-          if (activePeers.length > 1) {
-            updateStatus(true, 'Cloud Synced (Firewall Bypassed)');
-            logStatus('Connected via Secure Cloud Relay');
-            if (peerLabel) peerLabel.textContent = `${activePeers.length - 1} peer connected`;
+          const peerEntries = Object.keys(presence).filter(id => id !== myClientId);
+          
+          if (peerEntries.length > 0) {
+            if (currentConnectionState !== 'connected') {
+              currentConnectionState = 'connected';
+              updateStatus(true, 'Cloud Synced (Firewall Safe)');
+              logStatus('Peer connected! Real-time sync active.');
+              showToast('Peer connected!');
+            }
+            if (peerLabel) peerLabel.textContent = `${peerEntries.length} peer connected`;
           } else {
-            updateStatus(false, 'Waiting for peer...');
-            logStatus('Room active. Scan QR on 2nd device!');
+            if (currentConnectionState !== 'waiting') {
+              currentConnectionState = 'waiting';
+              updateStatus(false, 'Waiting for peer...');
+              logStatus('Room active. Scan QR on 2nd device!');
+            }
             if (peerLabel) peerLabel.textContent = '0 peers connected';
           }
         }
       }
     } catch (err) {
-      // Suppress network jitter logs while polling
+      // Suppress network drop blips
     } finally {
       isPolling = false;
     }
 
     clearTimeout(pollTimer);
-    pollTimer = setTimeout(pollCloudUpdates, 1200);
+    pollTimer = setTimeout(pollCloudUpdates, 1000);
   }
 
-  async function sendHeartbeat() {
-    try {
-      await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/presence/${myClientId}.json`, {
-        method: 'PUT',
-        body: JSON.stringify({ lastSeen: Date.now(), isHost: isHost })
-      });
-    } catch (e) {}
-  }
-
-  // Complete cleanup: Purge this room entirely from Firebase
+  // Guaranteed cleanup: purge this room completely from Firebase
   function cleanupRoomData() {
     if (!activeRoom || !FIREBASE_BASE) return;
     const roomUrl = `${FIREBASE_BASE}/rooms/${activeRoom}.json`;
@@ -249,7 +258,7 @@
         clearTimeout(typingTimer);
         typingTimer = setTimeout(() => {
           publishPayload({ type: 'SYNC_TEXT', text: editor.value });
-        }, 100);
+        }, 120);
       });
     }
 
@@ -263,7 +272,7 @@
         if (!file) return;
 
         if (file.size > 8 * 1024 * 1024) {
-          showToast('File too large (Max 8MB for cloud relay)');
+          showToast('File too large (Max 8MB)');
           fileInput.value = '';
           return;
         }
@@ -287,7 +296,7 @@
 
     if (resetRoomBtn) {
       resetRoomBtn.addEventListener('click', () => {
-        if (confirm('Start a new room? This will purge all cloud data for this room.')) {
+        if (confirm('Start a new room? This will delete the current room from the cloud.')) {
           cleanupRoomData();
           localStorage.removeItem(cacheKey);
           clearTimeout(pollTimer);
@@ -370,11 +379,11 @@
       });
     }
 
-    // Attach lifecycle exit purges (clean Firebase when closing tab/navigating away)
+    // Attach lifecycle exit purges
     window.addEventListener('pagehide', cleanupRoomData);
     window.addEventListener('beforeunload', cleanupRoomData);
 
-    // Initial setup: start heartbeat and update poller
+    // Start presence and sync loops
     sendHeartbeat();
     heartbeatTimer = setInterval(sendHeartbeat, 3000);
     pollCloudUpdates();
@@ -386,6 +395,7 @@
     initApp();
   }
 })();
+
 
  
               
