@@ -1,4 +1,4 @@
-// --- AirText: Enterprise WebRTC Engine (Anti-Loop & Corporate NAT Traversal) ---
+// --- AirText: Zero-Dependency Corporate WebRTC (Trickle ICE over Firebase) ---
 (function () {
   'use strict';
 
@@ -12,10 +12,10 @@
   let dataChannel = null;
   let isRemoteInput = false;
   let pollTimer = null;
-  let guestAnnounceTimer = null;
   let isPolling = false;
-  let lastHandledMessageId = null;
   let isNegotiating = false;
+  const processedMessageIds = new Set();
+  const remoteCandidatesQueue = [];
 
   let isHost = true;
   let activeRoom = '';
@@ -24,28 +24,12 @@
   const RAW_FIREBASE_URL = 'https://airtext-relay-default-rtdb.firebaseio.com';
   const FIREBASE_BASE = RAW_FIREBASE_URL.replace(/\/+$/, '');
 
-  // Enterprise TURN servers configured for port 443 TCP/TLS
+  // Standard Google STUN (Used by ShareDrop)
   const rtcConfig = {
-    iceCandidatePoolSize: 10,
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      {
-        urls: [
-          'turn:openrelay.metered.ca:443?transport=tcp',
-          'turn:openrelay.metered.ca:80?transport=tcp'
-        ],
-        username: 'openrelay',
-        credential: 'openrelay'
-      },
-      {
-        urls: [
-          'turns:openrelay.metered.ca:443?transport=tcp'
-        ],
-        username: 'openrelay',
-        credential: 'openrelay'
-      }
+      { urls: 'stun:stun2.l.google.com:19302' }
     ]
   };
 
@@ -109,42 +93,21 @@
     filesDeck.prepend(card);
   }
 
-  // Candidate gathering helper with timeout safeguard
-  function waitForIceGathering(pc) {
-    return new Promise((resolve) => {
-      if (pc.iceGatheringState === 'complete') {
-        resolve();
-      } else {
-        const checkState = () => {
-          if (pc.iceGatheringState === 'complete') {
-            pc.removeEventListener('icegatheringstatechange', checkState);
-            resolve();
-          }
-        };
-        pc.addEventListener('icegatheringstatechange', checkState);
-        setTimeout(() => {
-          pc.removeEventListener('icegatheringstatechange', checkState);
-          resolve();
-        }, 2000);
-      }
-    });
-  }
-
-  // --- 1. Firebase Signaling ---
-  async function sendSignal(payload) {
-    const targetPath = isHost ? 'h2g' : 'g2h';
+  // --- 1. Realtime Trickle Signaling via Firebase ---
+  async function pushSignal(payload) {
+    const targetPath = isHost ? 'h2g_signals' : 'g2h_signals';
     const packet = {
-      mid: Math.random().toString(36).substring(2, 9),
+      mid: 'm_' + Math.random().toString(36).substring(2, 9),
       time: Date.now(),
       ...payload
     };
     try {
       await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/${targetPath}.json`, {
-        method: 'PUT',
+        method: 'POST',
         body: JSON.stringify(packet)
       });
     } catch (e) {
-      console.warn('Firebase push error:', e);
+      console.warn('Signal push error:', e);
     }
   }
 
@@ -153,59 +116,63 @@
     if (isPolling) return;
     isPolling = true;
 
-    const listenPath = isHost ? 'g2h' : 'h2g';
+    const listenPath = isHost ? 'g2h_signals' : 'h2g_signals';
     try {
       const res = await fetch(`${FIREBASE_BASE}/rooms/${activeRoom}/${listenPath}.json?t=${Date.now()}`);
       if (res.ok) {
-        const msg = await res.json();
-        if (msg && msg.mid && msg.mid !== lastHandledMessageId) {
-          lastHandledMessageId = msg.mid;
-          handleSignalingMessage(msg);
+        const data = await res.json();
+        if (data && typeof data === 'object') {
+          for (const key of Object.keys(data)) {
+            const entry = data[key];
+            if (entry && entry.mid && !processedMessageIds.has(entry.mid)) {
+              processedMessageIds.add(entry.mid);
+              handleSignalingMessage(entry);
+            }
+          }
         }
       }
     } catch (err) {
-      // Ignore temporary polling network drops
+      // Suppress network jitter logs while awaiting peer
     } finally {
       isPolling = false;
     }
 
     if (!dataChannel || dataChannel.readyState !== 'open') {
       clearTimeout(pollTimer);
-      pollTimer = setTimeout(pollSignaling, 1500);
+      pollTimer = setTimeout(pollSignaling, 1000);
     }
   }
 
   function cleanupFirebaseRoom() {
     if (!activeRoom || !FIREBASE_BASE) return;
-    const cleanupUrl = `${FIREBASE_BASE}/rooms/${activeRoom}.json`;
     try {
-      fetch(cleanupUrl, { method: 'DELETE', keepalive: true }).catch(() => {});
+      fetch(`${FIREBASE_BASE}/rooms/${activeRoom}.json`, { method: 'DELETE', keepalive: true }).catch(() => {});
     } catch (e) {}
   }
 
-  // --- 2. Deterministic WebRTC Setup ---
+  // --- 2. Deterministic WebRTC Setup (Trickle ICE) ---
   function initPeerConnection() {
     if (rtcPeer) return rtcPeer;
 
     rtcPeer = new RTCPeerConnection(rtcConfig);
+
+    // Stream ICE candidates individually as soon as local network interfaces discover them
+    rtcPeer.onicecandidate = (e) => {
+      if (e.candidate) {
+        pushSignal({ type: 'CANDIDATE', candidate: e.candidate.toJSON() });
+      }
+    };
 
     rtcPeer.oniceconnectionstatechange = () => {
       const state = rtcPeer.iceConnectionState;
       logStatus(`ICE State: ${state}`);
       if (state === 'connected' || state === 'completed') {
         logStatus('Direct P2P Synced');
-      } else if (state === 'failed') {
-        logStatus('Corporate firewall blocking UDP/TCP. Retrying...');
-        if (rtcPeer.restartIce) {
-          rtcPeer.restartIce();
-        }
       }
     };
 
     if (isHost) {
-      dataChannel = rtcPeer.createDataChannel('airtext_channel', {
-        ordered: true
-      });
+      dataChannel = rtcPeer.createDataChannel('airtext_channel');
       bindDataChannel(dataChannel);
     } else {
       rtcPeer.ondatachannel = (e) => {
@@ -223,60 +190,71 @@
 
     if (isHost) {
       if (data.type === 'GUEST_JOINED') {
-        // Prevent repeated negotiation if connection is already in progress
-        if (isNegotiating || (rtcPeer && rtcPeer.signalingState !== 'stable')) {
-          return;
-        }
+        if (isNegotiating) return;
         isNegotiating = true;
-        logStatus('Guest detected! Packaging complete Offer...');
-        const peer = initPeerConnection();
 
+        logStatus('Guest detected! Creating offer...');
+        const peer = initPeerConnection();
         try {
           const offer = await peer.createOffer();
           await peer.setLocalDescription(offer);
-          await waitForIceGathering(peer);
-          await sendSignal({ type: 'OFFER', sdp: peer.localDescription.sdp });
+          await pushSignal({ type: 'OFFER', sdp: offer.sdp });
         } catch (err) {
           console.error('Host offer error:', err);
           isNegotiating = false;
         }
       } else if (data.type === 'ANSWER') {
-        logStatus('Answer received! Finalizing connection...');
+        logStatus('Answer received! Connecting...');
         if (rtcPeer && rtcPeer.signalingState === 'have-local-offer') {
           await rtcPeer.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
+          drainCandidateQueue();
         }
+      } else if (data.type === 'CANDIDATE') {
+        applyOrQueueCandidate(data.candidate);
       }
     } else {
       if (data.type === 'OFFER') {
-        // Stop guest ping interval immediately once offer arrives
-        clearInterval(guestAnnounceTimer);
-        logStatus('Host offer received! Packaging complete Answer...');
+        logStatus('Host offer received! Generating answer...');
         const peer = initPeerConnection();
-
         try {
           await peer.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }));
+          drainCandidateQueue();
           const answer = await peer.createAnswer();
           await peer.setLocalDescription(answer);
-          await waitForIceGathering(peer);
-          await sendSignal({ type: 'ANSWER', sdp: peer.localDescription.sdp });
+          await pushSignal({ type: 'ANSWER', sdp: answer.sdp });
         } catch (err) {
           console.error('Guest answer error:', err);
         }
+      } else if (data.type === 'CANDIDATE') {
+        applyOrQueueCandidate(data.candidate);
       }
     }
   }
 
-  // --- 3. DataChannel Setup ---
+  function applyOrQueueCandidate(candidateObj) {
+    const candidate = new RTCIceCandidate(candidateObj);
+    if (rtcPeer && rtcPeer.remoteDescription && rtcPeer.remoteDescription.type) {
+      rtcPeer.addIceCandidate(candidate).catch((e) => console.warn('ICE add error:', e));
+    } else {
+      remoteCandidatesQueue.push(candidate);
+    }
+  }
+
+  function drainCandidateQueue() {
+    while (remoteCandidatesQueue.length > 0 && rtcPeer && rtcPeer.remoteDescription) {
+      const cand = remoteCandidatesQueue.shift();
+      rtcPeer.addIceCandidate(cand).catch(() => {});
+    }
+  }
+
+  // --- 3. DataChannel & Self-Cleanup ---
   function bindDataChannel(channel) {
     channel.onopen = () => {
       clearTimeout(pollTimer);
-      clearInterval(guestAnnounceTimer);
-      isNegotiating = false;
-
       cleanupFirebaseRoom();
 
       updateStatus(true, 'Direct P2P Synced');
-      logStatus('Direct P2P Synced (Firewall Bypassed)');
+      logStatus('Direct P2P Synced (ShareDrop Engine)');
       if (peerLabel) peerLabel.textContent = '1 device connected';
       showToast('Device connected!');
 
@@ -326,19 +304,10 @@
         });
       } catch (e) {}
     } else {
-      // Announce guest presence, stopping as soon as the host provides an offer
-      sendSignal({ type: 'GUEST_JOINED' });
-      clearInterval(guestAnnounceTimer);
-      guestAnnounceTimer = setInterval(() => {
-        if (!rtcPeer || rtcPeer.signalingState === 'stable') {
-          sendSignal({ type: 'GUEST_JOINED' });
-        } else {
-          clearInterval(guestAnnounceTimer);
-        }
-      }, 2500);
+      pushSignal({ type: 'GUEST_JOINED' });
     }
 
-    pollTimer = setTimeout(pollSignaling, 1000);
+    pollTimer = setTimeout(pollSignaling, 500);
   }
 
   // --- 4. Application Initialization ---
@@ -440,7 +409,6 @@
           cleanupFirebaseRoom();
           localStorage.removeItem(cacheKey);
           clearTimeout(pollTimer);
-          clearInterval(guestAnnounceTimer);
           window.location.hash = '';
           window.location.reload();
         }
@@ -533,4 +501,6 @@
     initApp();
   }
 })();
+ 
+              
         
