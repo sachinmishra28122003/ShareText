@@ -346,15 +346,23 @@
           qrCanvas.removeChild(qrCanvas.firstChild);
         }
         const shareUrl = getFullShareUrl();
-        const qrImg = document.createElement('img');
-        qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(shareUrl)}`;
-        qrImg.alt = 'Scan to Join';
-        qrImg.style.width = '180px';
-        qrImg.style.height = '180px';
-        qrImg.style.display = 'block';
-        qrImg.style.margin = '0 auto';
-        qrCanvas.appendChild(qrImg);
-        qrModal.classList.add('open');
+
+const qrImg = document.createElement("img");
+
+qrImg.src =
+  `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(shareUrl)}`;
+
+qrImg.alt = "Scan to Join";
+qrImg.style.width = "180px";
+qrImg.style.height = "180px";
+qrImg.style.display = "block";
+qrImg.style.margin = "0 auto";
+
+qrCanvas.innerHTML = "";
+qrCanvas.appendChild(qrImg);
+
+qrModal.classList.add("open");
+
       });
     }
 
